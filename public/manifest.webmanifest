@@ -1,0 +1,17 @@
+{
+  "name": "Kaizen Sensei",
+  "short_name": "Sensei",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#231F20",
+  "theme_color": "#231F20",
+  "icons": [
+    {
+      "src": "/logomark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
