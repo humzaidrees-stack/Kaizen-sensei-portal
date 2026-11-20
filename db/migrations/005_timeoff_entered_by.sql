@@ -1,0 +1,3 @@
+ALTER TABLE unavailability
+  ADD COLUMN IF NOT EXISTS entered_by TEXT,
+  ADD COLUMN IF NOT EXISTS entered_by_id INTEGER REFERENCES instructors(id) ON DELETE SET NULL;

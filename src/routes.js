@@ -270,22 +270,29 @@ route('POST', '/api/my/availability/confirm', 'teach', async (req, res, { user }
   send(res, 200, { ok: true });
 });
 
-route('POST', '/api/my/timeoff', 'teach', async (req, res, { user }) => {
-  const t = validateTimeoff(await readBody(req));
-  const row = await prepare(`INSERT INTO unavailability(instructor_id, start_date, end_date, start_time, end_time, note)
-    VALUES(?,?,?,?,?,?) RETURNING id`).get(user.id, t.start_date, t.end_date, t.start_time, t.end_time, t.note);
+async function saveTimeoff(instructor, raw, { enteredBy = null, enteredById = null, notify = true } = {}) {
+  const t = validateTimeoff(raw);
+  const row = await prepare(`INSERT INTO unavailability(instructor_id, start_date, end_date, start_time, end_time, note, entered_by, entered_by_id)
+    VALUES(?,?,?,?,?,?,?,?) RETURNING id`).get(
+    instructor.id, t.start_date, t.end_date, t.start_time, t.end_time, t.note, enteredBy, enteredById,
+  );
   const timeoff = { id: row.id, ...t };
   const result = await reconcile();
-  const covered = await classesCoveredBy(user, timeoff);
+  const covered = await classesCoveredBy(instructor, timeoff);
   const coveredIds = new Set(covered.map((c) => c.id));
-  if (covered.length) await safe(notifyTimeOff({ timeoff, instructor: user, classes: covered }));
+  if (notify && covered.length) await safe(notifyTimeOff({ timeoff, instructor, classes: covered }));
   await safe(notifyOpenedShifts((result.openedRows || []).filter((s) => !coveredIds.has(s.class_id))));
-  const picked = await prepare("SELECT * FROM shifts WHERE status='filled' AND assigned_instructor_id=? AND start>=?").all(user.id, nowLocal());
+  const picked = await prepare("SELECT * FROM shifts WHERE status='filled' AND assigned_instructor_id=? AND start>=?").all(instructor.id, nowLocal());
   const clashes = [];
   for (const s of picked) {
-    if (await awayRecord(user.id, s.start, s.end)) clashes.push({ start: s.start, name: s.name });
+    if (await awayRecord(instructor.id, s.start, s.end)) clashes.push({ start: s.start, name: s.name });
   }
-  send(res, 200, { id: row.id, opened: result.opened, clashes });
+  return { id: row.id, opened: result.opened, clashes, entered_by: enteredBy };
+}
+
+route('POST', '/api/my/timeoff', 'teach', async (req, res, { user }) => {
+  const saved = await saveTimeoff(user, await readBody(req));
+  send(res, 200, { id: saved.id, opened: saved.opened, clashes: saved.clashes });
 });
 
 route('DELETE', '/api/my/timeoff/:id', 'teach', async (req, res, { user, params }) => {
@@ -629,6 +636,42 @@ route('POST', '/api/admin/pins-from-phone', 'manager', async (req, res) => {
     results.push({ id: s.id, code: s.code, name: s.name, pin, status: 'set' });
   }
   send(res, 200, { results });
+});
+
+async function teachingInstructor(id) {
+  const row = await prepare("SELECT * FROM instructors WHERE id=? AND role IN ('sensei','manager')").get(id);
+  if (!row) bad('Not found');
+  return row;
+}
+
+route('GET', '/api/admin/instructors/:id/timeoff', 'desk', async (req, res, { params }) => {
+  const instructor = await teachingInstructor(params.id);
+  const timeoff = await prepare(`SELECT u.id, u.start_date, u.end_date, u.start_time, u.end_time, u.note,
+      u.entered_by, u.entered_by_id, u.created_at, e.name AS entered_by_name
+    FROM unavailability u
+    LEFT JOIN instructors e ON e.id = u.entered_by_id
+    WHERE u.instructor_id=? AND u.end_date>=?
+    ORDER BY u.start_date, u.id`).all(instructor.id, todayLocal());
+  send(res, 200, { timeoff });
+});
+
+route('POST', '/api/admin/instructors/:id/timeoff', 'desk', async (req, res, { user, params }) => {
+  const instructor = await teachingInstructor(params.id);
+  const body = await readBody(req);
+  const saved = await saveTimeoff(instructor, body, {
+    enteredBy: 'admin',
+    enteredById: user.id,
+    notify: body.notify !== false,
+  });
+  send(res, 200, saved);
+});
+
+route('DELETE', '/api/admin/timeoff/:timeoffId', 'desk', async (req, res, { params }) => {
+  const existing = await prepare('SELECT id FROM unavailability WHERE id=?').get(params.timeoffId);
+  if (!existing) bad('Not found');
+  await prepare('DELETE FROM unavailability WHERE id=?').run(existing.id);
+  const result = await reconcileAndAlert();
+  send(res, 200, { ok: true, closed: result.closed });
 });
 
 route('POST', '/api/admin/instructors/:id/reset-pin', 'manager', async (req, res, { params }) => {
