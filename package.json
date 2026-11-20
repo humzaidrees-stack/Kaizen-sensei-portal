@@ -1,0 +1,21 @@
+{
+  "name": "kaizen-sensei-portal",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phone-first portal for Kaizen Pilates sensei: availability, time off, and open shifts, with Mindbody substitute write-back.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node scripts/dev-server.js",
+    "start": "node scripts/dev-server.js",
+    "migrate": "node db/migrate.js",
+    "seed": "node db/seed.js",
+    "test": "node --import ./test/env.js --test --test-concurrency=1 test/*.test.js",
+    "build": "node scripts/build.js"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  }
+}
