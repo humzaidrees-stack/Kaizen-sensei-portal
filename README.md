@@ -122,6 +122,8 @@ The kaizenwell Vercel project is on the **Hobby** plan. Hobby rejects a cron tha
 
 The 30-minute run is GitHub Actions, in `.github/workflows/sync.yml` (`*/30 * * * *`, plus **Run workflow** for a manual trigger). It `curl`s the full sync URL. Time off does not wait for either job: saving or removing it reconciles open shifts in that request.
 
+On the Other preset, `api/[...path].js` is only reached for a single segment (`/api/health` works, `/api/cron/sync` does not). `vercel.json` rewrites every `/api/:path*` that does not already match a file to `/api/router`, and the handler rebuilds the original path from the `path` query. `/api/cron/sync` is also its own file, so the daily cron and the GitHub workflow hit it directly.
+
 Both callers can overlap. The route takes a Postgres advisory lock and, if a sync is already running, returns `200` with `{ "skipped": true, "reason": "sync_in_progress" }` instead of starting a second one. A finished sync is safe to repeat: classes are replaced for the window, filled shifts stay filled, and each desk alert is deduped.
 
 #### GitHub repository secrets
@@ -173,7 +175,9 @@ Add to the home screen uses the name **Kaizen Sensei** (`manifest.webmanifest`).
 | Path | What it is |
 |---|---|
 | `public/` | The phone UI, brand assets, web app manifest |
-| `api/[...path].js` | Vercel serverless entry |
+| `api/[...path].js` | Vercel function for one-segment paths such as `/api/health` |
+| `api/router.js` | Nested `/api/*` paths, via the rewrite in `vercel.json` |
+| `api/cron/sync.js` | Daily Vercel cron and the GitHub sync workflow |
 | `src/logic.js` | Scheduling rules (the reference cross-check) |
 | `src/routes.js` | API |
 | `src/mindbody.js` | Mindbody Public API v6 client |

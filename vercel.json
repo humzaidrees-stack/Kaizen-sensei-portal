@@ -6,8 +6,20 @@
       "schedule": "0 1 * * *"
     }
   ],
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/router?path=:path*"
+    }
+  ],
   "functions": {
     "api/[...path].js": {
+      "maxDuration": 60
+    },
+    "api/router.js": {
+      "maxDuration": 60
+    },
+    "api/cron/sync.js": {
       "maxDuration": 60
     }
   },
