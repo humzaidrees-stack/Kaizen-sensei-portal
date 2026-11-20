@@ -6,6 +6,7 @@ process.env.CRON_SECRET = process.env.CRON_SECRET || 'test-cron-secret';
 process.env.APP_BASE_URL = '';
 for (const key of [
   'MB_API_KEY', 'MB_SITE_ID', 'MB_USERNAME', 'MB_PASSWORD', 'MB_LOCATION_IDS',
+  'SLACK_BOT_TOKEN', 'SLACK_ALERT_CHANNEL',
   'WA_TOKEN', 'WA_PHONE_NUMBER_ID', 'WA_TEMPLATE_NAME', 'FRONT_DESK_WA_E164',
   'RESEND_API_KEY', 'ALERT_EMAIL_FROM', 'ALERT_EMAIL_TO',
 ]) delete process.env[key];
