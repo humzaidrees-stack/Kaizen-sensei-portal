@@ -14,6 +14,7 @@ const FRONTEND_ROUTES = [
   ['PUT', '/api/my/pin'],
   ['GET', '/api/my/overview'],
   ['PUT', '/api/my/availability'],
+  ['POST', '/api/my/availability/confirm'],
   ['POST', '/api/my/timeoff'],
   ['DELETE', '/api/my/timeoff/4'],
   ['POST', '/api/shifts/4/claim'],
@@ -31,6 +32,8 @@ const FRONTEND_ROUTES = [
   ['POST', '/api/admin/instructors'],
   ['PUT', '/api/admin/instructors/4'],
   ['POST', '/api/admin/instructors/4/reset-pin'],
+  ['GET', '/api/admin/instructors/4/availability'],
+  ['PUT', '/api/admin/instructors/4/availability'],
   ['PUT', '/api/admin/settings'],
 ];
 
