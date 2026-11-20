@@ -49,6 +49,7 @@ h2 { font-size: 18px; color: var(--cocoa); }
 h3 { font-size: 15px; }
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
+.never { color: var(--cocoa); background: var(--attention); display: block; width: fit-content; margin-top: 4px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
 .label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--porcelain); font-weight: 700; }
 
 /* ---------- login ---------- */

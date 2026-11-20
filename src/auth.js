@@ -49,6 +49,7 @@ export function publicUser(i) {
     mb_name: i.mb_name,
     active: !!i.active,
     must_change_pin: !!i.must_change_pin,
+    last_login_at: i.last_login_at ? new Date(i.last_login_at).toISOString() : null,
   };
 }
 
@@ -159,6 +160,8 @@ export async function verifyLogin(code, pin) {
     return { ok: false, status: 401, error: 'That ID and PIN do not match.' };
   }
   await clearLoginFailures(key);
+  const stamped = await prepare('UPDATE instructors SET last_login_at=NOW() WHERE id=? RETURNING last_login_at').get(user.id);
+  user.last_login_at = stamped?.last_login_at || null;
   const token = await createSession(user.id);
   return { ok: true, token, user };
 }
