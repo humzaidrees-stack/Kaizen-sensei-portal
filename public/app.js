@@ -447,7 +447,7 @@ function aSync() {
         <span class="label">Connection</span>
         <h2 style="margin:6px 0 8px">${s.mindbody ? 'Connected' : 'Not connected yet'}</h2>
         <p class="small muted" style="margin:0 0 14px">${s.mindbody
-          ? `Classes for the next six weeks sync on the schedule (every 30 minutes on Vercel Pro) and when you press Sync now. ${s.mbWrite ? 'Approved pick-ups are written back to Mindbody as substitutes.' : 'Add a staff login to have approved pick-ups written back to Mindbody.'}`
+          ? `Classes for the next six weeks sync every 30 minutes from the scheduled job, once a day from Vercel, and when you press Sync now. ${s.mbWrite ? 'Approved pick-ups are written back to Mindbody as substitutes.' : 'Add a staff login to have approved pick-ups written back to Mindbody.'}`
           : 'Add the Mindbody API key and site ID to the server settings to pull classes automatically. Until then, import a schedule CSV.'}</p>
         <p class="small" style="margin:0 0 14px">Schedule source: <b>${{ mindbody: 'Mindbody', csv: 'CSV import', demo: 'Demo data', none: 'None' }[s.source]}</b>${s.last ? `<br><span class="muted">Last updated ${esc(new Date(s.last).toLocaleString('en-GB', { timeZone: 'Asia/Dubai', dateStyle: 'medium', timeStyle: 'short' }))}</span>` : ''}</p>
         ${s.lastError ? `<div class="error">${esc(s.lastError)}</div>` : ''}

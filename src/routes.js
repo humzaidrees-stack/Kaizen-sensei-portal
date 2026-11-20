@@ -12,6 +12,7 @@ import {
 import { notifyTimeOff, notifyOpenedShifts, notifyClaim, notifyReminders, flushQueuedAlerts } from './alerts.js';
 import { parseCsv, normDate, normTime } from './csv.js';
 import { HttpError, bad, send, readBody, cookies, isDate, isTime, cronAuthorized } from './http.js';
+import { withSyncLock } from './sync-lock.js';
 
 const STAMP = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`;
 
@@ -528,15 +529,14 @@ route('PUT', '/api/admin/settings', 'manager', async (req, res) => {
   send(res, 200, { opened: result.opened, closed: result.closed });
 });
 
-route('GET', '/api/cron/sync', null, async (req, res) => {
+async function runCron(req, res) {
   if (!cronAuthorized(req)) throw new HttpError(401, 'Unauthorised');
-  send(res, 200, await runScheduledSync());
-});
+  // 200 when another sync holds the lock, so a second caller (Vercel plus GitHub) is a no-op.
+  send(res, 200, await withSyncLock(() => runScheduledSync()));
+}
 
-route('POST', '/api/cron/sync', null, async (req, res) => {
-  if (!cronAuthorized(req)) throw new HttpError(401, 'Unauthorised');
-  send(res, 200, await runScheduledSync());
-});
+route('GET', '/api/cron/sync', null, runCron);
+route('POST', '/api/cron/sync', null, runCron);
 
 export async function dispatch(req, res) {
   const url = new URL(req.url, 'http://localhost');

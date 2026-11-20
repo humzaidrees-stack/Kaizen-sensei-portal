@@ -114,17 +114,33 @@ The value is a single line, for example `Christina is away 6 to 21 Dec. 14 class
 6. Seed only a demo database, never production member data (there is none in this app, but seed wipes the tables): `ALLOW_SEED_RESET=1 SEED_FIXED_PINS=0 npm run seed` with production `DATABASE_URL` in the environment. Prefer random PINs and read `data/DEMO_LOGINS.txt` locally. Do not set `SEED_FIXED_PINS=1` against production.
 7. Confirm `GET /api/health` returns `{"ok":true}` and a sensei can sign in.
 
-### Cron
+### Cron (Hobby)
 
-`vercel.json` schedules `GET /api/cron/sync` every 30 minutes (`*/30 * * * *`). Vercel calls it with `Authorization: Bearer $CRON_SECRET`. The job pulls Mindbody classes when credentials exist, runs the cross-check, sends 48-hour reminders, and flushes alerts that were queued overnight.
+The kaizenwell Vercel project is on the **Hobby** plan. Hobby rejects a cron that runs more than once a day (`cron_jobs_limits_reached`), so `vercel.json` schedules `GET /api/cron/sync` once a day at `0 1 * * *`. That is 01:00 UTC, which is **05:00 Asia/Dubai** (no daylight saving). Vercel calls it with `Authorization: Bearer $CRON_SECRET`.
 
-**Hobby plans only allow a cron that runs once per day.** A `*/30` schedule is rejected on Hobby. Either:
+05:00 is before the desk alert window (08:00–21:00). The daily run still pulls Mindbody and queues anything new. It does not send WhatsApp or email. The queue goes out on the next run that falls inside the window.
 
-- Upgrade the kaizenwell project to **Pro**, which allows this schedule, or
-- Change the schedule in `vercel.json` to once a day inside studio hours, for example `0 4 * * *` (08:00 Asia/Dubai, which does not observe daylight saving), and redeploy. Time off still opens shifts and alerts the desk immediately in the request. The daily job still syncs Mindbody, sends the morning queue, and sends 48-hour reminders, just less often.
-- Or point an external scheduler (cron-job.org, GitHub Actions, or similar) at `https://<your-domain>/api/cron/sync` every 30 minutes with header `Authorization: Bearer <CRON_SECRET>` or `x-cron-secret: <CRON_SECRET>`.
+The 30-minute run is GitHub Actions, in `.github/workflows/sync.yml` (`*/30 * * * *`, plus **Run workflow** for a manual trigger). It `curl`s the full sync URL. Time off does not wait for either job: saving or removing it reconciles open shifts in that request.
 
-Time off does not wait for cron. Saving or removing it reconciles open shifts in that request.
+Both callers can overlap. The route takes a Postgres advisory lock and, if a sync is already running, returns `200` with `{ "skipped": true, "reason": "sync_in_progress" }` instead of starting a second one. A finished sync is safe to repeat: classes are replaced for the window, filled shifts stay filled, and each desk alert is deduped.
+
+#### GitHub repository secrets
+
+On the GitHub repo: **Settings → Secrets and variables → Actions → New repository secret**.
+
+| Secret | Required | Value |
+|---|---|---|
+| `SYNC_URL` | Yes | Full URL of the sync route, for example `https://<project>.vercel.app/api/cron/sync`. No trailing slash on the host, and include the path. |
+| `CRON_SECRET` | Yes | The same string as the Vercel environment variable `CRON_SECRET`. |
+| `VERCEL_BYPASS_SECRET` | Only if Deployment Protection is on | The project's **Protection Bypass for Automation** secret (Vercel → Project → Settings → Deployment Protection). |
+
+Until `SYNC_URL` and `CRON_SECRET` are both set, the workflow prints a notice and exits successfully, so the schedule does not fail on an unconfigured repo. `CRON_SECRET` on GitHub must match Vercel or the route returns 401 and the workflow fails.
+
+Vercel Authentication (Deployment Protection) answers external requests, including this workflow, before the function runs. Vercel's own daily cron is not blocked. If protection is on, create the bypass secret in Vercel, copy it into `VERCEL_BYPASS_SECRET`, and the workflow sends it as `x-vercel-protection-bypass`. The app still requires `Authorization: Bearer`. The bypass header on its own does not authorise the route. Leaving protection on without that secret makes `curl` fail on Vercel's login response.
+
+To run it once by hand: GitHub → Actions → Sync → Run workflow.
+
+GitHub may start a scheduled run a few minutes late. A private repo that sits idle for about 60 days can also have scheduled workflows paused until someone pushes or runs one by hand.
 
 ## Mindbody
 
@@ -167,10 +183,12 @@ Add to the home screen uses the name **Kaizen Sensei** (`manifest.webmanifest`).
 | `db/seed.js` | Demo roster, template, and form answers |
 | `sample-data/` | The November CSVs |
 | `scripts/dev-server.js` | Local static server plus the same API |
+| `src/sync-lock.js` | One-at-a-time guard for the sync route |
+| `.github/workflows/sync.yml` | GitHub Actions sync every 30 minutes |
 
 ## Tests
 
-`npm test` covers the scheduling rules (placeholder, time off overlap, closing a shift when the reason is gone, leaving a filled shift alone, availability, conflicts, candidates) and the API (login lockout, HttpOnly cookie, sensei isolation, desk vs manager, time off → claim → approve → Mindbody note or write, CSV import, cron auth, alert quiet hours, WhatsApp template, email fallback).
+`npm test` covers the scheduling rules (placeholder, time off overlap, closing a shift when the reason is gone, leaving a filled shift alone, availability, conflicts, candidates) and the API (login lockout, HttpOnly cookie, sensei isolation, desk vs manager, time off → claim → approve → Mindbody note or write, CSV import, cron auth including the Vercel bypass header, the sync lock, alert quiet hours, WhatsApp template, email fallback).
 
 ## Not in this version
 
