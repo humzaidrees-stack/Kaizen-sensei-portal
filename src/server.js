@@ -9,6 +9,8 @@ export async function handle(req, res) {
     if (res.headersSent) return;
     const known = err instanceof HttpError;
     if (!known) console.error(err);
-    send(res, known ? err.status : 500, { error: known ? err.message : 'Something went wrong.' });
+    const payload = { error: known ? err.message : 'Something went wrong.' };
+    if (known && err.code) payload.code = err.code;
+    send(res, known ? err.status : 500, payload);
   }
 }

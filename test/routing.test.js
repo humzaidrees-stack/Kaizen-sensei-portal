@@ -32,6 +32,7 @@ const FRONTEND_ROUTES = [
   ['POST', '/api/admin/instructors'],
   ['PUT', '/api/admin/instructors/4'],
   ['POST', '/api/admin/instructors/4/reset-pin'],
+  ['POST', '/api/admin/pins-from-phone'],
   ['GET', '/api/admin/instructors/4/availability'],
   ['PUT', '/api/admin/instructors/4/availability'],
   ['PUT', '/api/admin/settings'],

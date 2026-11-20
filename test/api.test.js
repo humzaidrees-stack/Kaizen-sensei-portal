@@ -287,7 +287,7 @@ describe('API', { concurrency: 1 }, () => {
     const admin = await api('/api/login', { method: 'POST', body: { code: 'ADMIN', pin: '9999' } });
     const created = await api('/api/admin/instructors', { method: 'POST', token: admin.cookie, body: { name: 'New Sensei', mb_name: 'New Sensei' } });
     assert.equal(created.status, 200);
-    assert.match(created.data.code, /^KP/);
+    assert.equal(created.data.code, 'NEWS');
     assert.match(created.data.pin, /^\d{6}$/);
     const page = await fetch(`${base}/`);
     const html = await page.text();

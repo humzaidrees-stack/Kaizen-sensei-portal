@@ -4,10 +4,10 @@ import {
   nowLocal, todayLocal, addDays, toMin, reconcile, matchInstructor, awayRecord,
   fitsWeekly, teachingConflict, candidatesFor, isPlaceholder, placeholderName, classesCoveredBy,
 } from './logic.js';
-import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, pushSubstitute } from './mindbody.js';
+import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, fetchStaffPhones, pushSubstitute } from './mindbody.js';
 import {
   publicUser, canTeach, canDesk, isManager, loadUserByToken, destroySession,
-  verifyLogin, sessionCookie, clearCookie, hashPin, newPin, checkPin, nextCode,
+  verifyLogin, sessionCookie, clearCookie, hashPin, newPin, checkPin, nextCode, pinFromPhone,
 } from './auth.js';
 import { notifyTimeOff, notifyOpenedShifts, notifyClaim, notifyReminders, flushQueuedAlerts } from './alerts.js';
 import { parseCsv, normDate, normTime } from './csv.js';
@@ -178,7 +178,7 @@ route('PUT', '/api/my/pin', 'user', async (req, res, { user }) => {
   const { current, next } = await readBody(req);
   if (!checkPin(String(current || ''), user.pin_hash)) bad('Current PIN is not right.');
   if (!/^\d{4,8}$/.test(String(next || ''))) bad('New PIN must be 4 to 8 digits.');
-  await prepare('UPDATE instructors SET pin_hash=? WHERE id=?').run(hashPin(next), user.id);
+  await prepare('UPDATE instructors SET pin_hash=?, must_change_pin=FALSE WHERE id=?').run(hashPin(next), user.id);
   send(res, 200, { ok: true });
 });
 
@@ -528,13 +528,13 @@ route('POST', '/api/admin/instructors', 'manager', async (req, res) => {
   const b = await readBody(req);
   const name = String(b.name || '').trim();
   if (!name) bad('Name is required.');
-  const code = String(b.code || '').trim().toUpperCase() || await nextCode();
+  const code = String(b.code || '').trim().toUpperCase() || await nextCode(name);
   if (!/^[A-Z0-9-]{3,20}$/.test(code)) bad('Login ID: 3 to 20 letters or numbers.');
   if (await prepare('SELECT 1 FROM instructors WHERE UPPER(code)=?').get(code)) bad('That login ID is taken.');
   const role = b.role && ['sensei', 'front_desk', 'manager'].includes(b.role) ? b.role : 'sensei';
   const pin = newPin();
-  const row = await prepare(`INSERT INTO instructors(code, name, mb_staff_id, mb_name, pin_hash, role)
-    VALUES(?,?,?,?,?,?) RETURNING id`).get(code, name, b.mb_staff_id || null, b.mb_name || null, hashPin(pin), role);
+  const row = await prepare(`INSERT INTO instructors(code, name, mb_staff_id, mb_name, pin_hash, role, must_change_pin)
+    VALUES(?,?,?,?,?,?, TRUE) RETURNING id`).get(code, name, b.mb_staff_id || null, b.mb_name || null, hashPin(pin), role);
   await reconcileAndAlert();
   send(res, 200, { id: row.id, code, pin });
 });
@@ -589,13 +589,71 @@ route('PUT', '/api/admin/instructors/:id/availability', 'desk', async (req, res,
   send(res, 200, await availabilityPayload(fresh));
 });
 
+function jsonBody(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  return {};
+}
+
+async function mindbodyPhone(staffId) {
+  if (!staffId) return '';
+  if (!mbConfigured()) return '';
+  const phones = await fetchStaffPhones();
+  return phones[String(staffId)] || '';
+}
+
+async function assignPin(instructorId, pin) {
+  await prepare('UPDATE instructors SET pin_hash=?, must_change_pin=TRUE WHERE id=?').run(hashPin(pin), instructorId);
+  await prepare('DELETE FROM sessions WHERE instructor_id=?').run(instructorId);
+}
+
+route('POST', '/api/admin/pins-from-phone', 'manager', async (req, res) => {
+  const sensei = await prepare("SELECT id, code, name, mb_staff_id FROM instructors WHERE role='sensei' AND active=TRUE ORDER BY name").all();
+  let phones = null;
+  if (sensei.some((s) => s.mb_staff_id)) {
+    if (!mbConfigured()) throw new HttpError(502, 'Mindbody is not connected yet.');
+    try { phones = await fetchStaffPhones(); }
+    catch (err) { throw new HttpError(502, err.message); }
+  }
+  const results = [];
+  for (const s of sensei) {
+    if (!s.mb_staff_id) {
+      results.push({ id: s.id, code: s.code, name: s.name, pin: null, status: 'no_mb_link' });
+      continue;
+    }
+    const pin = pinFromPhone(phones?.[String(s.mb_staff_id)]);
+    if (!pin) {
+      results.push({ id: s.id, code: s.code, name: s.name, pin: null, status: 'no_phone' });
+      continue;
+    }
+    await assignPin(s.id, pin);
+    results.push({ id: s.id, code: s.code, name: s.name, pin, status: 'set' });
+  }
+  send(res, 200, { results });
+});
+
 route('POST', '/api/admin/instructors/:id/reset-pin', 'manager', async (req, res, { params }) => {
-  const existing = await prepare('SELECT id FROM instructors WHERE id=?').get(params.id);
+  const existing = await prepare('SELECT id, mb_staff_id FROM instructors WHERE id=?').get(params.id);
   if (!existing) bad('Not found');
-  const pin = newPin();
-  await prepare('UPDATE instructors SET pin_hash=? WHERE id=?').run(hashPin(pin), params.id);
-  await prepare('DELETE FROM sessions WHERE instructor_id=?').run(params.id);
-  send(res, 200, { pin });
+  const body = jsonBody(await readBody(req));
+  let pin;
+  let source = 'random';
+  if (body.from === 'phone') {
+    if (!existing.mb_staff_id) throw new HttpError(422, 'No phone number on file in Mindbody', 'no_phone');
+    let rawPhone = '';
+    try { rawPhone = await mindbodyPhone(existing.mb_staff_id); }
+    catch (err) { throw new HttpError(502, err.message); }
+    pin = pinFromPhone(rawPhone);
+    if (!pin) throw new HttpError(422, 'No phone number on file in Mindbody', 'no_phone');
+    source = 'phone';
+  } else if (body.phone != null && String(body.phone).trim()) {
+    pin = pinFromPhone(body.phone);
+    if (!pin) bad('Enter a phone number with at least 4 digits.');
+    source = 'phone';
+  } else {
+    pin = newPin();
+  }
+  await assignPin(existing.id, pin);
+  send(res, 200, { pin, source });
 });
 
 route('PUT', '/api/admin/settings', 'manager', async (req, res) => {
