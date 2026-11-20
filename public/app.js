@@ -499,11 +499,12 @@ function aTeam() {
     ${adm.instructors.map(i => `<tr style="${i.active ? '' : 'opacity:.5'}"><td><b>${esc(i.name)}</b>${i.active ? '' : ' <span class="chip line">Inactive</span>'}${lastLoginLine(i.last_login_at)}</td><td>${esc(i.code)}</td>
       <td class="small">${i.mb_staff_id ? `ID ${esc(i.mb_staff_id)}` : ''}${i.mb_name ? `<div class="muted">${esc(i.mb_name)}</div>` : ''}${!i.mb_staff_id && !i.mb_name ? '<span class="muted">Not linked</span>' : ''}</td>
       <td class="small">${i.blocks ? `<button class="linkbtn" data-avail="${i.id}">${i.blocks} hours a week</button>` : '<span class="muted">Not set</span>'}${i.avail_updated ? `<div class="muted">Updated ${esc(i.avail_updated.slice(0, 10))}</div>` : ''}</td>
-      <td style="text-align:right"><div class="btns" style="justify-content:flex-end"><button class="btn ghost small" data-edit="${i.id}">Edit</button> <button class="btn ghost small" data-pin="${i.id}">New PIN</button> <button class="btn ghost small" data-phonepin="${i.id}">PIN from phone</button></div></td></tr>`).join('')}
+      <td style="text-align:right"><div class="btns" style="justify-content:flex-end"><button class="btn ghost small" data-leave="${i.id}">Add leave</button> <button class="btn ghost small" data-edit="${i.id}">Edit</button> <button class="btn ghost small" data-pin="${i.id}">New PIN</button> <button class="btn ghost small" data-phonepin="${i.id}">PIN from phone</button></div></td></tr>`).join('')}
     </tbody></table></div>`;
   $('#add').onclick = () => editInstructor(null);
   $('#main').onclick = async e => {
-    const ed = e.target.closest('[data-edit]'), p = e.target.closest('[data-pin]'), av = e.target.closest('[data-avail]'), pp = e.target.closest('[data-phonepin]');
+    const ed = e.target.closest('[data-edit]'), p = e.target.closest('[data-pin]'), av = e.target.closest('[data-avail]'), pp = e.target.closest('[data-phonepin]'), lv = e.target.closest('[data-leave]');
+    if (lv) leaveModal(adm.instructors.find(i => i.id == lv.dataset.leave));
     if (ed) editInstructor(adm.instructors.find(i => i.id == ed.dataset.edit));
     if (av) { const i = adm.instructors.find(x => x.id == av.dataset.avail); modal(`<h2>${esc(i.name)}</h2><p class="muted small">Weekly availability</p><div id="ag"></div><div class="actions"><button class="btn" data-close>Done</button></div>`, bg => availabilityGrid($('#ag', bg), i.availability, new Set(), true)); }
     if (pp) {
@@ -523,6 +524,54 @@ function aTeam() {
       showPin(i.name, i.code, r.pin);
     }
   };
+}
+function leaveItems(rows) {
+  if (!rows.length) return '<div class="empty">No upcoming leave.</div>';
+  return `<div class="list">${rows.map(t => `<div class="item"><div class="what"><h3>${esc(rangeText(t))}</h3>${t.note ? `<div class="small muted">${esc(t.note)}</div>` : ''}${t.entered_by === 'admin' ? '<div class="small muted">Entered by the studio</div>' : ''}</div><div class="act"><button class="linkbtn" type="button" data-deloff="${t.id}">Remove</button></div></div>`).join('')}</div>`;
+}
+async function leaveModal(person) {
+  let rows = [];
+  try { rows = (await api(`/api/admin/instructors/${person.id}/timeoff`)).timeoff || []; }
+  catch (err) { toast(err.message); return; }
+  modal(`<h2>Leave for ${esc(person.name)}</h2>
+    <p class="muted small">Classes in this range go up for cover, including ones that sync in later. Their login is not changed.</p>
+    <div id="lerr"></div>
+    <form id="lf">
+      <div class="row"><label class="field"><span>From</span><input type="date" name="start_date" min="${today}" required></label>
+        <label class="field"><span>To</span><input type="date" name="end_date" min="${today}"></label></div>
+      <label class="field"><span>Note (optional)</span><input name="note" maxlength="300" placeholder="Holiday, appointment, travel"></label>
+      <label class="small muted" style="display:flex;gap:8px;align-items:center;margin:-6px 0 14px"><input type="checkbox" id="lnotify" checked style="width:auto;min-height:0"> Send the desk alert</label>
+      <button class="btn" type="submit">Save leave</button>
+    </form>
+    <h3 style="margin:18px 0 8px">Upcoming</h3>
+    <div id="llist">${leaveItems(rows)}</div>
+    <div class="actions"><button class="btn ghost" data-close>Done</button></div>`,
+  (bg, close) => {
+    $('#lf', bg).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const body = { start_date: f.start_date.value, end_date: f.end_date.value || undefined, note: f.note.value, notify: $('#lnotify', bg).checked };
+      try {
+        const r = await api(`/api/admin/instructors/${person.id}/timeoff`, { method: 'POST', body });
+        toast(r.opened ? `Saved. ${r.opened} class${r.opened > 1 ? 'es' : ''} posted for cover.` : 'Leave saved');
+        close();
+        route();
+        leaveModal(person);
+      } catch (err) { $('#lerr', bg).innerHTML = `<div class="error">${esc(err.message)}</div>`; }
+    };
+    $('#llist', bg).onclick = async (e) => {
+      const d = e.target.closest('[data-deloff]');
+      if (!d) return;
+      if (!await confirmBox('Remove this leave?', 'Classes posted for cover because of it come off the board if nobody has picked them up yet.', 'Remove')) return;
+      try {
+        await api(`/api/admin/timeoff/${d.dataset.deloff}`, { method: 'DELETE' });
+        toast('Removed');
+        close();
+        route();
+        leaveModal(person);
+      } catch (err) { toast(err.message); }
+    };
+  });
 }
 function askPhonePin(person) {
   modal(`<h2>No phone number on file</h2>

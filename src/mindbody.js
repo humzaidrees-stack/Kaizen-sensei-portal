@@ -148,6 +148,8 @@ export async function syncClasses() {
   });
   await setSetting('last_sync', new Date().toISOString());
   await setSetting('schedule_source', 'mindbody');
+  // Classes that arrive inside leave already on file are opened here, even when
+  // the leave was booked before this sync window included them.
   return { classes: classes.length, ...(await reconcile()) };
 }
 
