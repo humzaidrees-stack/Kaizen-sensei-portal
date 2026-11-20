@@ -1,9 +1,13 @@
-// Front-desk alerts. One WhatsApp utility template to the desk number, otherwise
-// email (Resend), otherwise a log line plus a row in `alerts`. Nothing is thrown
-// when the env vars are missing. Outside 08:00–21:00 Asia/Dubai the row is queued
-// and the cron route sends it in the morning.
+// Front-desk alerts. Slack DM (or a channel) is the primary path: Grace copies
+// the plain-text block into the sensei WhatsApp group. WhatsApp and email are
+// optional fallbacks. Nothing is thrown when the env vars are missing.
+// Outside 08:00–21:00 Asia/Dubai the row is queued and the cron route sends it
+// in the morning.
 import { prepare } from './db.js';
 import { inAlertWindow, addHoursLocal, nowLocal } from './logic.js';
+
+export const SLACK_HEADING = 'Sensei update for the WhatsApp group:';
+export const SLACK_TIMEOUT_MS = 8000;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -38,12 +42,62 @@ function withLink(text) {
   return `${text}${link}`.replace(/\s+/g, ' ').trim();
 }
 
+export function slackConfigured() {
+  return !!(process.env.SLACK_BOT_TOKEN && process.env.SLACK_ALERT_CHANNEL);
+}
+
 export function whatsAppConfigured() {
   return !!(process.env.WA_TOKEN && process.env.WA_PHONE_NUMBER_ID && process.env.WA_TEMPLATE_NAME && process.env.FRONT_DESK_WA_E164);
 }
 
 export function emailConfigured() {
   return !!(process.env.RESEND_API_KEY && process.env.ALERT_EMAIL_FROM && process.env.ALERT_EMAIL_TO);
+}
+
+// Heading for Grace, then the group message in a fence (plain text inside it),
+// then the open-shifts link outside the fence so she can open it without copying.
+export function formatSlackMessage(body) {
+  const plain = String(body || '').replace(/```/g, "'''").trim();
+  const base = (process.env.APP_BASE_URL || '').replace(/\/$/, '');
+  const link = base ? `${base}/#/shifts` : '';
+  const text = link
+    ? `${SLACK_HEADING}\n\`\`\`\n${plain}\n\`\`\`\nOpen shifts: ${link}`
+    : `${SLACK_HEADING}\n\`\`\`\n${plain}\n\`\`\``;
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: SLACK_HEADING } },
+    { type: 'section', text: { type: 'mrkdwn', text: `\`\`\`\n${plain}\n\`\`\`` } },
+  ];
+  if (link) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `<${link}|Open shifts>` } });
+  return { text, blocks };
+}
+
+async function trySlack(body) {
+  if (!slackConfigured()) return { ok: false, detail: 'slack_not_configured' };
+  const message = formatSlackMessage(body);
+  try {
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+      headers: {
+        Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        channel: process.env.SLACK_ALERT_CHANNEL,
+        text: message.text,
+        blocks: message.blocks,
+      }),
+    });
+    const raw = await res.text();
+    let json = {};
+    try { json = raw ? JSON.parse(raw) : {}; } catch { json = {}; }
+    if (!res.ok) return { ok: false, detail: `slack_error:http_${res.status}` };
+    if (!json.ok) return { ok: false, detail: `slack_error:${json.error || 'unknown'}` };
+    return { ok: true, detail: json.ts || 'accepted' };
+  } catch (err) {
+    const timedOut = err.name === 'TimeoutError' || err.name === 'AbortError';
+    return { ok: false, detail: timedOut ? 'slack_error:timeout' : `slack_error:${err.message}` };
+  }
 }
 
 async function tryWhatsApp(text) {
@@ -116,12 +170,21 @@ export async function deliverAlert(id) {
   const alert = await prepare('SELECT * FROM alerts WHERE id=?').get(id);
   if (!alert || alert.status === 'sent' || alert.status === 'logged' || alert.status === 'failed') return alert;
   const attempts = (alert.attempts || 0) + 1;
-  const wa = await tryWhatsApp(alert.body);
-  const email = wa.ok ? { ok: false, detail: '' } : await tryEmail(alert.body);
+  const slack = await trySlack(alert.body);
+  const wa = slack.ok ? { ok: false, detail: '' } : await tryWhatsApp(alert.body);
+  const email = slack.ok || wa.ok ? { ok: false, detail: '' } : await tryEmail(alert.body);
+  const outcome = [slack.detail, wa.detail, email.detail].filter(Boolean).join('; ');
+  const configuredFailed = (slackConfigured() && !slack.ok)
+    || (whatsAppConfigured() && !wa.ok && !slack.ok)
+    || (emailConfigured() && !email.ok && !slack.ok && !wa.ok);
   let status = 'logged';
   let channel = 'log';
-  let detail = '';
-  if (wa.ok) {
+  let detail = outcome;
+  if (slack.ok) {
+    status = 'sent';
+    channel = 'slack';
+    detail = slack.detail;
+  } else if (wa.ok) {
     status = 'sent';
     channel = 'whatsapp';
     detail = wa.detail;
@@ -129,17 +192,14 @@ export async function deliverAlert(id) {
     status = 'sent';
     channel = 'email';
     detail = email.detail;
-  } else if (wa.detail === 'whatsapp_not_configured') {
-    detail = [wa.detail, email.detail].filter(Boolean).join('; ');
-    console.log(`[kaizen-alert] ${alert.body} (${detail})`);
-  } else if (attempts < 5) {
+  } else if (configuredFailed && attempts < 5) {
     status = 'queued';
     channel = null;
-    detail = [wa.detail, email.detail].filter(Boolean).join('; ');
-  } else {
+  } else if (configuredFailed) {
     status = 'failed';
-    detail = [wa.detail, email.detail].filter(Boolean).join('; ');
-    console.log(`[kaizen-alert] ${alert.body} (${detail})`);
+    console.log(`[kaizen-alert] ${alert.body} (${outcome})`);
+  } else {
+    console.log(`[kaizen-alert] ${alert.body} (${outcome})`);
   }
   await prepare(`UPDATE alerts
     SET status=?, channel=?, detail=?, attempts=?,

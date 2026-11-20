@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { resetDb } from './helpers.js';
 import { closePool, prepare } from '../src/db.js';
 import { inAlertWindow, hourInStudio } from '../src/logic.js';
-import { enqueueAlert, flushQueuedAlerts, formatAwayRange, formatClassMoment, deliverAlert } from '../src/alerts.js';
+import { enqueueAlert, flushQueuedAlerts, formatAwayRange, formatClassMoment, formatSlackMessage, deliverAlert, SLACK_HEADING, SLACK_TIMEOUT_MS } from '../src/alerts.js';
 
 const INSIDE = new Date('2026-06-01T06:00:00Z'); // 10:00 Asia/Dubai
 const OUTSIDE = new Date('2026-06-01T18:30:00Z'); // 22:30 Asia/Dubai
@@ -33,11 +33,111 @@ describe('desk alerts', { concurrency: 1 }, () => {
     }, { now: INSIDE });
     assert.equal(logged.status, 'logged');
     assert.equal(logged.channel, 'log');
+    assert.match(logged.detail, /slack_not_configured/);
+    assert.match(logged.detail, /whatsapp_not_configured/);
+    assert.match(logged.detail, /email_not_configured/);
     const flushed = await flushQueuedAlerts(INSIDE);
     assert.equal(flushed.flushed, 1);
     const row = await prepare("SELECT status, channel FROM alerts WHERE dedupe_key='q1'").get();
     assert.equal(row.status, 'logged');
     assert.equal(row.channel, 'log');
+  });
+
+  it('DMs Grace on Slack with a copyable group message and does not also call WhatsApp', async () => {
+    process.env.SLACK_BOT_TOKEN = 'xoxb-test';
+    process.env.SLACK_ALERT_CHANNEL = 'U012GRACE';
+    process.env.APP_BASE_URL = 'https://kaizen-sensei-portal.vercel.app';
+    process.env.WA_TOKEN = 'token';
+    process.env.WA_PHONE_NUMBER_ID = '555';
+    process.env.WA_TEMPLATE_NAME = 'kaizen_desk_alert';
+    process.env.FRONT_DESK_WA_E164 = '971500000000';
+    const plain = 'Christina is away 6 to 21 Dec. 14 classes need cover.';
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: JSON.parse(init.body), headers: init.headers, signal: init.signal });
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, ts: '1710000000.000100' }) };
+    };
+    try {
+      const row = await enqueueAlert({ dedupeKey: 'sl-1', kind: 'timeoff', body: plain }, { now: INSIDE });
+      assert.equal(row.status, 'sent');
+      assert.equal(row.channel, 'slack');
+      assert.equal(row.detail, '1710000000.000100');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, 'https://slack.com/api/chat.postMessage');
+      assert.equal(calls[0].headers.Authorization, 'Bearer xoxb-test');
+      assert.equal(calls[0].body.channel, 'U012GRACE');
+      assert.equal(calls[0].signal.aborted, false);
+      assert.equal(SLACK_TIMEOUT_MS, 8000);
+      const formatted = formatSlackMessage(plain);
+      assert.equal(calls[0].body.text, formatted.text);
+      assert.equal(calls[0].body.text.startsWith(`${SLACK_HEADING}\n`), true);
+      const fenced = calls[0].body.text.split('```')[1].trim();
+      assert.equal(fenced, plain);
+      assert.equal(fenced.includes('*'), false);
+      assert.match(calls[0].body.text, /Open shifts: https:\/\/kaizen-sensei-portal\.vercel\.app\/#\/shifts/);
+      assert.equal(calls[0].body.blocks[1].text.text, `\`\`\`\n${plain}\n\`\`\``);
+    } finally {
+      globalThis.fetch = original;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_ALERT_CHANNEL;
+      process.env.APP_BASE_URL = '';
+      delete process.env.WA_TOKEN;
+      delete process.env.WA_PHONE_NUMBER_ID;
+      delete process.env.WA_TEMPLATE_NAME;
+      delete process.env.FRONT_DESK_WA_E164;
+    }
+  });
+
+  it('records slack_error when Slack returns 200 with ok false, then uses WhatsApp', async () => {
+    process.env.SLACK_BOT_TOKEN = 'xoxb-test';
+    process.env.SLACK_ALERT_CHANNEL = 'C012';
+    process.env.WA_TOKEN = 'token';
+    process.env.WA_PHONE_NUMBER_ID = '555';
+    process.env.WA_TEMPLATE_NAME = 'kaizen_desk_alert';
+    process.env.FRONT_DESK_WA_E164 = '971500000000';
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('slack.com')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ok: false, error: 'not_in_channel' }) };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ messages: [{ id: 'wamid.FALLBACK' }] }) };
+    };
+    try {
+      const row = await enqueueAlert({
+        dedupeKey: 'sl-err', kind: 'sensei', body: 'Sat 21 Nov, 15:00 Active Sculpt has no instructor.',
+      }, { now: INSIDE });
+      assert.equal(row.status, 'sent');
+      assert.equal(row.channel, 'whatsapp');
+      assert.equal(row.detail, 'wamid.FALLBACK');
+    } finally {
+      globalThis.fetch = original;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_ALERT_CHANNEL;
+      delete process.env.WA_TOKEN;
+      delete process.env.WA_PHONE_NUMBER_ID;
+      delete process.env.WA_TEMPLATE_NAME;
+      delete process.env.FRONT_DESK_WA_E164;
+    }
+  });
+
+  it('keeps slack_error:not_in_channel when no fallback is configured', async () => {
+    process.env.SLACK_BOT_TOKEN = 'xoxb-test';
+    process.env.SLACK_ALERT_CHANNEL = 'U012GRACE';
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ ok: false, error: 'not_in_channel' }) });
+    try {
+      const row = await enqueueAlert({
+        dedupeKey: 'sl-only', kind: 'claim', body: 'Claudia asked for Sat 21 Nov, 15:00 Active Sculpt.',
+      }, { now: INSIDE });
+      assert.equal(row.status, 'queued');
+      assert.match(row.detail, /slack_error:not_in_channel/);
+      assert.match(row.detail, /whatsapp_not_configured/);
+    } finally {
+      globalThis.fetch = original;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_ALERT_CHANNEL;
+    }
   });
 
   it('sends one WhatsApp template to the front desk number and does not duplicate it', async () => {
