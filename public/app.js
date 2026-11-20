@@ -487,11 +487,16 @@ function aTimeoff() {
     </tbody></table></div>` : '<div class="empty">No time off booked.</div>'}`;
 }
 
+function lastLoginLine(value) {
+  if (!value) return '<div class="small never">Never logged in</div>';
+  const when = new Date(value).toLocaleString('en-GB', { timeZone: 'Asia/Dubai', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  return `<div class="small muted">Last login ${esc(when)}</div>`;
+}
 function aTeam() {
   $('#main').innerHTML = `<div class="head"><div><h1>Instructors</h1><p>Each instructor signs in with their ID and a PIN. Link them to their Mindbody staff profile so classes and time off line up.</p></div>
       <button class="btn" id="add">Add instructor</button></div>
     <div class="tablewrap"><table><thead><tr><th>Name</th><th>Login ID</th><th>Mindbody</th><th>Availability</th><th></th></tr></thead><tbody>
-    ${adm.instructors.map(i => `<tr style="${i.active ? '' : 'opacity:.5'}"><td><b>${esc(i.name)}</b>${i.active ? '' : ' <span class="chip line">Inactive</span>'}</td><td>${esc(i.code)}</td>
+    ${adm.instructors.map(i => `<tr style="${i.active ? '' : 'opacity:.5'}"><td><b>${esc(i.name)}</b>${i.active ? '' : ' <span class="chip line">Inactive</span>'}${lastLoginLine(i.last_login_at)}</td><td>${esc(i.code)}</td>
       <td class="small">${i.mb_staff_id ? `ID ${esc(i.mb_staff_id)}` : ''}${i.mb_name ? `<div class="muted">${esc(i.mb_name)}</div>` : ''}${!i.mb_staff_id && !i.mb_name ? '<span class="muted">Not linked</span>' : ''}</td>
       <td class="small">${i.blocks ? `<button class="linkbtn" data-avail="${i.id}">${i.blocks} hours a week</button>` : '<span class="muted">Not set</span>'}${i.avail_updated ? `<div class="muted">Updated ${esc(i.avail_updated.slice(0, 10))}</div>` : ''}</td>
       <td style="text-align:right"><div class="btns" style="justify-content:flex-end"><button class="btn ghost small" data-edit="${i.id}">Edit</button> <button class="btn ghost small" data-pin="${i.id}">New PIN</button> <button class="btn ghost small" data-phonepin="${i.id}">PIN from phone</button></div></td></tr>`).join('')}
