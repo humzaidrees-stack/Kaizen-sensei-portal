@@ -1,0 +1,29 @@
+# Every 30 minutes, because the kaizenwell Vercel project is on Hobby and can
+# only run the cron in vercel.json once a day. Time off still reconciles in the
+# request. This job is what keeps Mindbody and the morning alert queue fresh.
+name: Sync
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull Mindbody and flush queued desk alerts
+        env:
+          SYNC_URL: ${{ secrets.SYNC_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
+        run: |
+          if [ -z "$SYNC_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::notice::Skipping sync. Set repository secrets SYNC_URL (full https URL of /api/cron/sync) and CRON_SECRET (the same value as the Vercel env var)."
+            exit 0
+          fi
+          args=(-fsS --retry 3 --retry-delay 5 --max-time 90 -H "Authorization: Bearer ${CRON_SECRET}")
+          if [ -n "$VERCEL_BYPASS_SECRET" ]; then
+            args+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+          fi
+          curl "${args[@]}" "$SYNC_URL"

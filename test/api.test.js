@@ -4,6 +4,7 @@ import { resetDb, makeUser, makeClass } from './helpers.js';
 import { closePool, prepare } from '../src/db.js';
 import { addDays, todayLocal } from '../src/logic.js';
 import { createDevServer } from '../scripts/dev-server.js';
+import { withSyncLock } from '../src/sync-lock.js';
 
 let server;
 let base;
@@ -245,6 +246,40 @@ describe('API', { concurrency: 1 }, () => {
     assert.equal(ran.status, 200);
     const again = await prepare("SELECT COUNT(*)::int AS n FROM alerts WHERE kind='sensei'").get();
     assert.equal(again.n, 1);
+
+    const bypassOnly = await fetch(`${base}/api/cron/sync`, { headers: { 'x-vercel-protection-bypass': 'bypass-token' } });
+    assert.equal(bypassOnly.status, 401);
+    let release;
+    const started = new Promise((resolve) => { release = { go: null, mark: resolve }; });
+    const held = withSyncLock(async () => {
+      release.mark();
+      await new Promise((resolve) => { release.go = resolve; });
+    });
+    await started;
+    const overlap = await fetch(`${base}/api/cron/sync`, {
+      headers: {
+        authorization: `Bearer ${process.env.CRON_SECRET}`,
+        'x-vercel-protection-bypass': 'bypass-token',
+      },
+    });
+    const overlapBody = await overlap.json();
+    release.go();
+    await held;
+    assert.equal(overlap.status, 200);
+    assert.equal(overlapBody.skipped, true);
+    assert.equal(overlapBody.reason, 'sync_in_progress');
+    const after = await fetch(`${base}/api/cron/sync`, {
+      headers: {
+        authorization: `Bearer ${process.env.CRON_SECRET}`,
+        'x-vercel-protection-bypass': 'bypass-token',
+      },
+    });
+    const afterBody = await after.json();
+    assert.equal(after.status, 200);
+    assert.equal(afterBody.skipped, undefined);
+    assert.ok(afterBody.sync);
+    const stillOne = await prepare("SELECT COUNT(*)::int AS n FROM alerts WHERE kind='sensei'").get();
+    assert.equal(stillOne.n, 1);
   });
 
   it('lets a manager create a sensei and blocks the browser from seeing Mindbody secrets', async () => {
