@@ -74,7 +74,7 @@ async function raw(pathname, { method = 'GET', body } = {}, auth = true) {
 const local = (s) => (s || '').slice(0, 16);
 const staffName = (s) => (s ? (s.DisplayName || s.Name || [s.FirstName, s.LastName].filter(Boolean).join(' ')) : null);
 
-export async function fetchStaff() {
+async function fetchStaffMembers() {
   const out = [];
   let offset = 0;
   for (;;) {
@@ -84,7 +84,23 @@ export async function fetchStaff() {
     if (out.length >= (r.PaginationResponse?.TotalResults ?? 0) || !batch.length) break;
     offset += 200;
   }
-  return out.map((s) => ({ id: String(s.Id), name: staffName(s) }));
+  return out;
+}
+
+export async function fetchStaff() {
+  const members = await fetchStaffMembers();
+  return members.map((s) => ({ id: String(s.Id), name: staffName(s) }));
+}
+
+// Phones stay in this map for the PIN helper. Do not return them from an API route or write them to the database.
+export async function fetchStaffPhones() {
+  const members = await fetchStaffMembers();
+  const phones = {};
+  for (const s of members) {
+    if (s?.Id == null) continue;
+    phones[String(s.Id)] = String(s.MobilePhone || s.HomePhone || s.WorkPhone || '').trim();
+  }
+  return phones;
 }
 
 export async function syncClasses() {

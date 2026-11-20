@@ -15,8 +15,12 @@ async function api(path, opts = {}) {
   }
   const r = await fetch(path, init);
   const data = await r.json().catch(() => ({}));
-  if (r.status === 401 && path !== '/api/login') { me = null; render(); throw new Error(data.error || 'Please sign in.'); }
-  if (!r.ok) throw new Error(data.error || 'Something went wrong.');
+  if (!r.ok) {
+    const err = new Error(data.error || 'Something went wrong.');
+    err.code = data.code || '';
+    if (r.status === 401 && path !== '/api/login') { me = null; render(); }
+    throw err;
+  }
   return data;
 }
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 3200); }
@@ -82,7 +86,7 @@ function renderLogin() {
         <h1>Sensei portal</h1>
         <p>Your availability, your time off and open classes to pick up.</p>
         <div id="err"></div>
-        <label class="field"><span>Your ID</span><input name="code" autocomplete="username" autocapitalize="characters" placeholder="KP101" required></label>
+        <label class="field"><span>Your ID</span><input name="code" autocomplete="username" autocapitalize="none" placeholder="e.g. GabyL" required></label>
         <label class="field"><span>PIN</span><input name="pin" type="password" inputmode="numeric" autocomplete="current-password" required></label>
         <button class="btn block" type="submit">Sign in</button>
         <p class="small muted" style="margin-top:20px">Forgot your PIN? Ask the studio to reset it.</p>
@@ -97,6 +101,7 @@ function renderLogin() {
       me = r.user;
       const target = me.role === 'sensei' ? '#/week' : '#/shifts';
       if (location.hash === target) route(); else location.hash = target; // hashchange renders
+      if (me.must_change_pin) changePin({ prompt: true });
     } catch (err) { $('#err').innerHTML = `<div class="error">${esc(err.message)}</div>`; }
   };
 }
@@ -113,13 +118,14 @@ function shell(tabs, active, content, counts = {}) {
   $('#out').onclick = async () => { await api('/api/logout', { method: 'POST' }); me = null; location.hash = ''; render(); };
   $('#pinbtn').onclick = changePin;
 }
-function changePin() {
-  modal(`<h2>Change your PIN</h2><p class="muted small">4 to 8 digits.</p><div id="perr"></div>
+function changePin(opts = {}) {
+  const hint = opts.prompt ? `<p class="muted small">Your PIN is the last 4 digits of your phone. Please choose your own.</p>` : '';
+  modal(`<h2>Change your PIN</h2>${hint}<p class="muted small">4 to 8 digits.</p><div id="perr"></div>
     <label class="field"><span>Current PIN</span><input id="p1" type="password" inputmode="numeric"></label>
     <label class="field"><span>New PIN</span><input id="p2" type="password" inputmode="numeric"></label>
     <div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="psave">Save</button></div>`,
   (bg, close) => { $('#psave', bg).onclick = async () => {
-    try { await api('/api/my/pin', { method: 'PUT', body: { current: $('#p1', bg).value, next: $('#p2', bg).value } }); close(); toast('PIN updated'); }
+    try { await api('/api/my/pin', { method: 'PUT', body: { current: $('#p1', bg).value, next: $('#p2', bg).value } }); if (me) me.must_change_pin = false; close(); toast('PIN updated'); }
     catch (e) { $('#perr', bg).innerHTML = `<div class="error">${esc(e.message)}</div>`; } }; });
 }
 const demoBanner = () => source === 'demo' ? `<div class="banner">Demo copy. The schedule here is built from the November template, not live from Mindbody.</div>`
@@ -488,13 +494,23 @@ function aTeam() {
     ${adm.instructors.map(i => `<tr style="${i.active ? '' : 'opacity:.5'}"><td><b>${esc(i.name)}</b>${i.active ? '' : ' <span class="chip line">Inactive</span>'}</td><td>${esc(i.code)}</td>
       <td class="small">${i.mb_staff_id ? `ID ${esc(i.mb_staff_id)}` : ''}${i.mb_name ? `<div class="muted">${esc(i.mb_name)}</div>` : ''}${!i.mb_staff_id && !i.mb_name ? '<span class="muted">Not linked</span>' : ''}</td>
       <td class="small">${i.blocks ? `<button class="linkbtn" data-avail="${i.id}">${i.blocks} hours a week</button>` : '<span class="muted">Not set</span>'}${i.avail_updated ? `<div class="muted">Updated ${esc(i.avail_updated.slice(0, 10))}</div>` : ''}</td>
-      <td style="text-align:right;white-space:nowrap"><button class="btn ghost small" data-edit="${i.id}">Edit</button> <button class="btn ghost small" data-pin="${i.id}">New PIN</button></td></tr>`).join('')}
+      <td style="text-align:right"><div class="btns" style="justify-content:flex-end"><button class="btn ghost small" data-edit="${i.id}">Edit</button> <button class="btn ghost small" data-pin="${i.id}">New PIN</button> <button class="btn ghost small" data-phonepin="${i.id}">PIN from phone</button></div></td></tr>`).join('')}
     </tbody></table></div>`;
   $('#add').onclick = () => editInstructor(null);
   $('#main').onclick = async e => {
-    const ed = e.target.closest('[data-edit]'), p = e.target.closest('[data-pin]'), av = e.target.closest('[data-avail]');
+    const ed = e.target.closest('[data-edit]'), p = e.target.closest('[data-pin]'), av = e.target.closest('[data-avail]'), pp = e.target.closest('[data-phonepin]');
     if (ed) editInstructor(adm.instructors.find(i => i.id == ed.dataset.edit));
     if (av) { const i = adm.instructors.find(x => x.id == av.dataset.avail); modal(`<h2>${esc(i.name)}</h2><p class="muted small">Weekly availability</p><div id="ag"></div><div class="actions"><button class="btn" data-close>Done</button></div>`, bg => availabilityGrid($('#ag', bg), i.availability, new Set(), true)); }
+    if (pp) {
+      const i = adm.instructors.find(x => x.id == pp.dataset.phonepin);
+      try {
+        const r = await api(`/api/admin/instructors/${i.id}/reset-pin`, { method: 'POST', body: { from: 'phone' } });
+        showPin(i.name, i.code, r.pin);
+      } catch (err) {
+        if (err.code === 'no_phone') askPhonePin(i);
+        else toast(err.message);
+      }
+    }
     if (p) {
       const i = adm.instructors.find(x => x.id == p.dataset.pin);
       if (!await confirmBox(`New PIN for ${i.name}?`, 'Their old PIN stops working and they are signed out.', 'Create PIN')) return;
@@ -502,6 +518,22 @@ function aTeam() {
       showPin(i.name, i.code, r.pin);
     }
   };
+}
+function askPhonePin(person) {
+  modal(`<h2>No phone number on file</h2>
+    <p class="muted small">Mindbody has no usable number for ${esc(person.name)}. Type one to make a PIN from its last 4 digits. The number is not saved.</p>
+    <div id="pherr"></div>
+    <label class="field"><span>Phone</span><input id="ph" inputmode="tel" autocomplete="off"></label>
+    <div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="phgo">Set PIN</button></div>`,
+  (bg, close) => {
+    $('#phgo', bg).onclick = async () => {
+      try {
+        const r = await api(`/api/admin/instructors/${person.id}/reset-pin`, { method: 'POST', body: { phone: $('#ph', bg).value } });
+        close();
+        showPin(person.name, person.code, r.pin);
+      } catch (err) { $('#pherr', bg).innerHTML = `<div class="error">${esc(err.message)}</div>`; }
+    };
+  });
 }
 function showPin(name, code, pin) {
   modal(`<h2>${esc(name)}</h2><p class="muted small">Share this with them privately. It will not be shown again. They can change it after signing in.</p>
@@ -514,7 +546,8 @@ async function editInstructor(i) {
   if (adm.sync.mindbody) { try { staff = (await api('/api/admin/mb-staff')).staff; } catch {} }
   modal(`<h2>${i ? 'Edit instructor' : 'Add instructor'}</h2><div id="ierr"></div>
     <label class="field"><span>Name</span><input id="in" value="${esc(i?.name || '')}"></label>
-    <label class="field"><span>Login ID</span><input id="ic" value="${esc(i?.code || '')}" placeholder="Leave blank to create one" style="text-transform:uppercase"></label>
+    <label class="field"><span>Login ID</span><input id="ic" value="${esc(i?.code || '')}" placeholder="Leave blank for first name + last initial" style="text-transform:uppercase"></label>
+    <p class="small muted" style="margin:-8px 0 14px">Defaults to first name + last initial, for example GABYL.</p>
     ${staff.length ? `<label class="field"><span>Mindbody staff</span><select id="is"><option value="">Not linked</option>${staff.map(s => `<option value="${esc(s.id)}" data-name="${esc(s.name)}" ${String(i?.mb_staff_id) === s.id ? 'selected' : ''}>${esc(s.name)} (${esc(s.id)})</option>`).join('')}</select></label>`
       : `<div class="row"><label class="field"><span>Mindbody staff ID</span><input id="is" value="${esc(i?.mb_staff_id || '')}" placeholder="Optional"></label>
         <label class="field"><span>Name in Mindbody</span><input id="im" value="${esc(i?.mb_name || '')}" placeholder="As it appears on classes"></label></div>`}
@@ -587,6 +620,7 @@ const render = route;
 async function boot() {
   try { const r = await api('/api/me'); me = r.user; today = r.today; source = r.source; } catch { me = null; }
   route();
+  if (me?.must_change_pin) changePin({ prompt: true });
 }
 window.addEventListener('hashchange', route);
 boot();

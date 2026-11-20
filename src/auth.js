@@ -48,7 +48,25 @@ export function publicUser(i) {
     mb_staff_id: i.mb_staff_id,
     mb_name: i.mb_name,
     active: !!i.active,
+    must_change_pin: !!i.must_change_pin,
   };
+}
+
+export function pinFromPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length < 4) return null;
+  return digits.slice(-4);
+}
+
+function nameWords(name) {
+  return String(name || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
 }
 
 export function canTeach(user) {
@@ -145,7 +163,28 @@ export async function verifyLogin(code, pin) {
   return { ok: true, token, user };
 }
 
-export async function nextCode() {
-  const row = await prepare("SELECT MAX(CAST(SUBSTR(code, 3) AS INTEGER)) AS m FROM instructors WHERE code LIKE 'KP%'").get();
-  return `KP${(row?.m || 100) + 1}`;
+// First name plus the first letter of the surname: "Gaby Lee" -> GABYL, "Dézi Olle" -> DEZIO.
+// If that ID is taken, use more of the surname, then a digit. ADMIN and DESK are never generated here.
+export async function nextCode(name) {
+  const words = nameWords(name);
+  const first = words[0] || 'SENSEI';
+  const surname = words.length > 1 ? words[words.length - 1] : '';
+  const stems = [];
+  if (surname) {
+    for (let i = 1; i <= surname.length; i++) stems.push(first + surname.slice(0, i));
+  } else {
+    stems.push(first);
+  }
+  const taken = async (code) => !!(await prepare('SELECT 1 FROM instructors WHERE UPPER(code)=?').get(code));
+  for (const stem of stems) {
+    const code = stem.slice(0, 20);
+    if (code.length >= 3 && !(await taken(code))) return code;
+  }
+  let stem = (stems[stems.length - 1] || 'SENSEI').slice(0, 18);
+  while (stem.length < 2) stem += '2';
+  for (let n = 2; n < 100; n++) {
+    const code = `${stem}${n}`.slice(0, 20);
+    if (code.length >= 3 && !(await taken(code))) return code;
+  }
+  throw new Error('Could not assign a login ID');
 }
