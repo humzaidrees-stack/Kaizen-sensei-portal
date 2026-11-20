@@ -48,6 +48,26 @@ export function cookies(req) {
 export const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
 export const isTime = (s) => /^\d{2}:\d{2}$/.test(s || '');
 
+// Vercel's Other preset registers api/[...path].js for one segment only.
+// Nested paths are rewritten to /api/router?path=<rest>. Rebuild the public URL
+// so the router still matches /api/cron/sync, /api/my/overview, and so on.
+const REWRITTEN_PATHS = new Set(['/api/router', '/api/[...path]']);
+
+export function resolveRequestUrl(req) {
+  const raw = req.url || '/';
+  let url;
+  try { url = new URL(raw, 'http://localhost'); }
+  catch { return raw; }
+  let pathname = url.pathname;
+  try { pathname = decodeURIComponent(pathname); } catch { /* keep the raw pathname */ }
+  if (!REWRITTEN_PATHS.has(pathname)) return raw;
+  const splat = url.searchParams.getAll('path').flatMap((part) => part.split('/')).filter(Boolean);
+  if (!splat.length) return raw;
+  url.searchParams.delete('path');
+  const query = url.searchParams.toString();
+  return `/api/${splat.join('/')}${query ? `?${query}` : ''}`;
+}
+
 export function cronAuthorized(req) {
   const secret = process.env.CRON_SECRET || '';
   if (!secret) return false;

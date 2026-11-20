@@ -11,7 +11,7 @@ import {
 } from './auth.js';
 import { notifyTimeOff, notifyOpenedShifts, notifyClaim, notifyReminders, flushQueuedAlerts } from './alerts.js';
 import { parseCsv, normDate, normTime } from './csv.js';
-import { HttpError, bad, send, readBody, cookies, isDate, isTime, cronAuthorized } from './http.js';
+import { HttpError, bad, send, readBody, cookies, isDate, isTime, cronAuthorized, resolveRequestUrl } from './http.js';
 import { withSyncLock } from './sync-lock.js';
 
 const STAMP = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`;
@@ -538,8 +538,12 @@ async function runCron(req, res) {
 route('GET', '/api/cron/sync', null, runCron);
 route('POST', '/api/cron/sync', null, runCron);
 
+export function matchRoute(method, pathname) {
+  return routes.some((r) => r.method === method && r.re.test(pathname));
+}
+
 export async function dispatch(req, res) {
-  const url = new URL(req.url, 'http://localhost');
+  const url = new URL(resolveRequestUrl(req), 'http://localhost');
   const user = await loadUserByToken(cookies(req).kp_s);
   for (const r of routes) {
     if (r.method !== req.method) continue;
