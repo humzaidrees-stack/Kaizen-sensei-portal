@@ -209,21 +209,64 @@ route('GET', '/api/my/overview', 'teach', async (req, res, { user }) => {
     classes,
     picked,
     shifts,
+    availability_status: await availabilityPayload(user),
   });
 });
+
+function availabilityStatus(row, blockCount) {
+  const pending = row.availability_prefilled_at
+    && (!row.availability_confirmed_at || row.availability_confirmed_at < row.availability_prefilled_at);
+  if (pending && blockCount > 0) return 'proposed';
+  if (blockCount > 0) return 'confirmed';
+  return 'not_set';
+}
+
+async function replaceAvailability(instructorId, blocks) {
+  await prepare('DELETE FROM availability WHERE instructor_id=?').run(instructorId);
+  const ins = prepare('INSERT INTO availability(instructor_id, dow, hour) VALUES(?,?,?) ON CONFLICT DO NOTHING');
+  let n = 0;
+  for (const pair of (blocks || []).slice(0, 400)) {
+    if (!Array.isArray(pair)) continue;
+    const [d, h] = pair;
+    if (d >= 0 && d <= 6 && h >= 0 && h <= 23) {
+      await ins.run(instructorId, d, h);
+      n++;
+    }
+  }
+  return n;
+}
+
+async function availabilityPayload(row) {
+  const blocks = await prepare('SELECT dow, hour FROM availability WHERE instructor_id=? ORDER BY dow, hour').all(row.id);
+  let prefilledByName = null;
+  if (row.availability_prefilled_by) {
+    prefilledByName = (await prepare('SELECT name FROM instructors WHERE id=?').get(row.availability_prefilled_by))?.name || null;
+  }
+  return {
+    blocks,
+    status: availabilityStatus(row, blocks.length),
+    prefilled_by: row.availability_prefilled_by || null,
+    prefilled_by_name: prefilledByName,
+    prefilled_at: row.availability_prefilled_at || null,
+    confirmed_at: row.availability_confirmed_at || null,
+  };
+}
 
 route('PUT', '/api/my/availability', 'teach', async (req, res, { user }) => {
   const { blocks } = await readBody(req);
   if (!Array.isArray(blocks)) bad('blocks required');
   await transaction(async () => {
-    await prepare('DELETE FROM availability WHERE instructor_id=?').run(user.id);
-    const ins = prepare('INSERT INTO availability(instructor_id, dow, hour) VALUES(?,?,?) ON CONFLICT DO NOTHING');
-    for (const pair of blocks.slice(0, 400)) {
-      const [d, h] = pair;
-      if (d >= 0 && d <= 6 && h >= 0 && h <= 23) await ins.run(user.id, d, h);
-    }
+    await replaceAvailability(user.id, blocks);
+    await prepare(`UPDATE instructors SET availability_confirmed_at=${STAMP} WHERE id=?`).run(user.id);
   });
   await setSetting(`avail_updated_${user.id}`, new Date().toISOString());
+  send(res, 200, { ok: true });
+});
+
+route('POST', '/api/my/availability/confirm', 'teach', async (req, res, { user }) => {
+  const n = await prepare('SELECT COUNT(*)::int AS n FROM availability WHERE instructor_id=?').get(user.id);
+  if (!n.n) bad('Nothing to confirm yet.');
+  await prepare(`UPDATE instructors SET availability_confirmed_at=${STAMP} WHERE id=?`).run(user.id);
   send(res, 200, { ok: true });
 });
 
@@ -280,12 +323,20 @@ route('GET', '/api/admin/overview', 'desk', async (req, res, { user }) => {
   const closedRows = await prepare("SELECT * FROM shifts WHERE start>=? AND status='closed' ORDER BY updated_at DESC LIMIT 15").all(now);
   const recentClosed = [];
   for (const s of closedRows) recentClosed.push(await shiftView(s));
-  const people = await prepare("SELECT * FROM instructors WHERE role='sensei' ORDER BY active DESC, name").all();
+  const people = await prepare(`SELECT i.*, p.name AS prefilled_by_name
+    FROM instructors i
+    LEFT JOIN instructors p ON p.id = i.availability_prefilled_by
+    WHERE i.role='sensei' ORDER BY i.active DESC, i.name`).all();
   const instructors = [];
   for (const i of people) {
+    const blockCount = (await prepare('SELECT COUNT(*)::int AS n FROM availability WHERE instructor_id=?').get(i.id)).n;
     const base = {
       ...publicUser(i),
-      blocks: (await prepare('SELECT COUNT(*)::int AS n FROM availability WHERE instructor_id=?').get(i.id)).n,
+      blocks: blockCount,
+      availability_status: availabilityStatus(i, blockCount),
+      availability_prefilled_at: i.availability_prefilled_at || null,
+      availability_confirmed_at: i.availability_confirmed_at || null,
+      availability_prefilled_by_name: i.prefilled_by_name || null,
     };
     if (user.role === 'manager') {
       base.has_pin = !!i.pin_hash;
@@ -508,6 +559,34 @@ route('PUT', '/api/admin/instructors/:id', 'manager', async (req, res, { params 
   if (active === false) await prepare('DELETE FROM sessions WHERE instructor_id=?').run(existing.id);
   await reconcileAndAlert();
   send(res, 200, { ok: true });
+});
+
+route('GET', '/api/admin/instructors/:id/availability', 'desk', async (req, res, { params }) => {
+  const row = await prepare("SELECT * FROM instructors WHERE id=? AND role='sensei'").get(params.id);
+  if (!row) bad('Not found');
+  send(res, 200, await availabilityPayload(row));
+});
+
+route('PUT', '/api/admin/instructors/:id/availability', 'desk', async (req, res, { user, params }) => {
+  const row = await prepare("SELECT * FROM instructors WHERE id=? AND role='sensei'").get(params.id);
+  if (!row) bad('Not found');
+  const { blocks } = await readBody(req);
+  if (!Array.isArray(blocks)) bad('blocks required');
+  await transaction(async () => {
+    const n = await replaceAvailability(row.id, blocks);
+    if (!n) {
+      await prepare(`UPDATE instructors
+        SET availability_prefilled_by=NULL, availability_prefilled_at=NULL, availability_confirmed_at=NULL
+        WHERE id=?`).run(row.id);
+    } else {
+      await prepare(`UPDATE instructors
+        SET availability_prefilled_by=?, availability_prefilled_at=${STAMP}, availability_confirmed_at=NULL
+        WHERE id=?`).run(user.id, row.id);
+    }
+  });
+  await setSetting(`avail_updated_${row.id}`, new Date().toISOString());
+  const fresh = await prepare('SELECT * FROM instructors WHERE id=?').get(row.id);
+  send(res, 200, await availabilityPayload(fresh));
 });
 
 route('POST', '/api/admin/instructors/:id/reset-pin', 'manager', async (req, res, { params }) => {

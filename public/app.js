@@ -130,8 +130,8 @@ const demoBanner = () => source === 'demo' ? `<div class="banner">Demo copy. The
 // =====================================================================
 function tabsFor(user) {
   if (user.role === 'sensei') return [['week', 'My classes'], ['shifts', 'Open shifts'], ['availability', 'Availability'], ['timeoff', 'Time off']];
-  if (user.role === 'front_desk') return [['shifts', 'Shifts'], ['schedule', 'Schedule'], ['timeoff', 'Time off']];
-  return [['shifts', 'Shifts'], ['schedule', 'Schedule'], ['timeoff', 'Time off'], ['team', 'Instructors'], ['sync', 'Mindbody'], ['mine', 'My classes'], ['mine-hours', 'My hours'], ['mine-off', 'My time off']];
+  if (user.role === 'front_desk') return [['shifts', 'Shifts'], ['schedule', 'Schedule'], ['timeoff', 'Time off'], ['hours', 'Availability']];
+  return [['shifts', 'Shifts'], ['schedule', 'Schedule'], ['timeoff', 'Time off'], ['hours', 'Availability'], ['team', 'Instructors'], ['sync', 'Mindbody'], ['mine', 'My classes'], ['mine-hours', 'My hours'], ['mine-off', 'My time off']];
 }
 
 let mine = null;
@@ -147,9 +147,57 @@ async function instructorView(tab, activeKey) {
   view();
 }
 
+function summariseBlocks(blocks) {
+  const by = [[], [], [], [], [], [], []];
+  for (const b of blocks || []) if (b.dow >= 0 && b.dow <= 6) by[b.dow].push(b.hour);
+  const parts = [];
+  by.forEach((hours, dow) => {
+    const sorted = [...new Set(hours)].sort((a, b) => a - b);
+    if (!sorted.length) return;
+    const ranges = [];
+    let start = sorted[0];
+    let prev = sorted[0];
+    for (const h of sorted.slice(1)) {
+      if (h === prev + 1) prev = h;
+      else { ranges.push([start, prev]); start = prev = h; }
+    }
+    ranges.push([start, prev]);
+    const text = ranges.map(([a, b]) => `${String(a).padStart(2, '0')}:00–${String(b + 1).padStart(2, '0')}:00`).join(', ');
+    parts.push(`${DAYS[dow]} ${text}`);
+  });
+  return parts.join(' · ') || 'No hours marked.';
+}
+
+function proposalBanner(editing) {
+  const p = mine?.availability_status;
+  if (!p || p.status !== 'proposed') return '';
+  const who = p.prefilled_by_name || 'The front desk';
+  return `<div class="card attn" style="margin-bottom:22px">
+    <h2>${esc(who)} filled in your available times — please check and confirm</h2>
+    <p class="small" style="margin:8px 0 14px">${esc(summariseBlocks(mine.availability))}</p>
+    <div class="btns">
+      <button class="btn" id="confirm-avail" type="button">Confirm</button>
+      ${editing ? '' : '<a class="btn ghost" href="#/availability">Edit</a>'}
+    </div>
+  </div>`;
+}
+
+function wireProposal() {
+  const btn = $('#confirm-avail');
+  if (!btn) return;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    try {
+      await api('/api/my/availability/confirm', { method: 'POST' });
+      toast('Availability confirmed');
+      route();
+    } catch (e) { btn.disabled = false; toast(e.message); }
+  };
+}
+
 function iWeek() {
   const items = [...mine.classes.map(c => ({ ...c, kind: 'class' })), ...mine.picked.map(s => ({ ...s, kind: 'picked' }))].sort((a, b) => a.start.localeCompare(b.start));
-  $('#main').innerHTML = `${demoBanner()}
+  $('#main').innerHTML = `${demoBanner()}${proposalBanner(false)}
     <div class="head"><div><h1>Hello ${esc(me.name.split(' ')[0])}</h1><p>Your next four weeks.</p></div>
       <a class="btn ghost" href="${me.role === 'manager' ? '#/mine-off' : '#/timeoff'}">Mark time off</a></div>
     ${items.length ? groupByDay(items).map(([d, list]) => `
@@ -161,6 +209,7 @@ function iWeek() {
           ${c.kind === 'class' && c.shift?.status === 'filled' ? `<span class="chip">Covered by ${esc(c.shift.assigned)}</span>` : ''}
         </div></div>`).join('')}
       </div></div>`).join('') : `<div class="empty">No classes on your schedule in the next four weeks.</div>`}`;
+  wireProposal();
 }
 
 function iShifts() {
@@ -178,7 +227,7 @@ function iShifts() {
         ? `<button class="btn ghost small" data-withdraw="${x.id}">Withdraw</button>`
         : `<button class="btn small" data-claim="${x.id}">Pick up</button>`}</div></div>`;
   };
-  $('#main').innerHTML = `${demoBanner()}
+  $('#main').innerHTML = `${demoBanner()}${proposalBanner(false)}
     <div class="head"><div><h1>Open shifts</h1><p>Classes that need an instructor. Pick one up and the studio will confirm it.</p></div></div>
     ${s.length ? groupByDay(s).map(([d, list]) => `<div class="daygroup"><span class="label">${esc(relDay(d))}</span><div class="list">${list.map(card).join('')}</div></div>`).join('')
       : '<div class="empty">No open shifts right now.</div>'}`;
@@ -191,6 +240,7 @@ function iShifts() {
       route();
     } catch (err) { toast(err.message); }
   };
+  wireProposal();
 }
 
 // Tap or drag across the grid to mark the hours you can teach each week.
@@ -218,21 +268,22 @@ function iAvailability() {
     const d = (dateObj(c.start).getUTCDay() + 6) % 7;
     for (let h = Number(c.start.slice(11, 13)); h < Math.ceil((Number(c.end.slice(11, 13)) * 60 + Number(c.end.slice(14, 16))) / 60); h++) teaching.add(`${d}-${h}`);
   }
-  $('#main').innerHTML = `
+  $('#main').innerHTML = `${proposalBanner(true)}
     <div class="head"><div><h1>Weekly availability</h1><p>Tap or drag to mark the hours you can teach in a normal week. We use this to offer you open shifts and to plan the schedule.</p></div></div>
     <div id="grid"></div>
     <div class="legend"><span><i class="on"></i>Available</span><span><i></i>Not available</span><span><i class="teach"></i>Your current classes</span></div>
     <div class="sticky-save"><span class="small muted" id="dirty"></span><button class="btn" id="save">Save availability</button></div>`;
   const read = availabilityGrid($('#grid'), mine.availability, teaching);
+  wireProposal();
   $('#grid').addEventListener('change', () => { $('#dirty').textContent = 'Unsaved changes'; });
   $('#save').onclick = async () => {
-    try { await api('/api/my/availability', { method: 'PUT', body: { blocks: read() } }); $('#dirty').textContent = ''; toast('Availability saved'); mine = await api('/api/my/overview'); }
+    try { await api('/api/my/availability', { method: 'PUT', body: { blocks: read() } }); toast('Availability saved'); route(); }
     catch (e) { toast(e.message); }
   };
 }
 
 function iTimeoff() {
-  $('#main').innerHTML = `
+  $('#main').innerHTML = `${proposalBanner(false)}
     <div class="head"><div><h1>Time off</h1><p>Dates you cannot teach. Any of your classes in that time go up for cover straight away.</p></div></div>
     <div class="grid">
       <form class="card sand" id="tf">
@@ -275,6 +326,7 @@ function iTimeoff() {
     if (!await confirmBox('Remove this time off?', 'Any classes posted for cover because of it will come off the board if nobody has picked them up yet.', 'Remove')) return;
     await api(`/api/my/timeoff/${d.dataset.del}`, { method: 'DELETE' }); toast('Removed'); route();
   });
+  wireProposal();
 }
 
 // =====================================================================
@@ -288,7 +340,7 @@ async function adminView(tab) {
   today = adm.today; source = adm.sync.source;
   const allowed = new Set(tabs.map(([k]) => k));
   const active = allowed.has(tab) ? tab : 'shifts';
-  const view = { shifts: aShifts, schedule: aSchedule, timeoff: aTimeoff, team: aTeam, sync: aSync }[active] || aShifts;
+  const view = { shifts: aShifts, schedule: aSchedule, timeoff: aTimeoff, hours: aHours, team: aTeam, sync: aSync }[active] || aShifts;
   shell(tabs, active, '', { shifts: adm.stats.pending });
   view();
 }
@@ -379,6 +431,47 @@ async function aSchedule() {
   $('#prev').onclick = () => { weekFrom = addDays(weekFrom, -7); aSchedule(); };
   $('#next').onclick = () => { weekFrom = addDays(weekFrom, 7); aSchedule(); };
   $('#this').onclick = () => { weekFrom = mondayOf(today); aSchedule(); };
+}
+
+function availabilityStatusLabel(i) {
+  if (i.availability_status === 'proposed') return '<span class="chip warm">Pre-filled, waiting for sensei</span>';
+  if (i.availability_status === 'confirmed') {
+    const when = i.availability_confirmed_at ? ` ${esc(stamp(i.availability_confirmed_at))}` : '';
+    return `<span class="chip dark">Confirmed${when}</span>`;
+  }
+  return '<span class="chip line">Not set</span>';
+}
+
+function aHours() {
+  const people = adm.instructors.filter(i => i.active !== false);
+  $('#main').innerHTML = `
+    <div class="head"><div><h1>Availability</h1><p>Fill in a sensei's usual hours. They confirm the next time they sign in.</p></div></div>
+    ${people.length ? `<div class="tablewrap"><table><thead><tr><th>Sensei</th><th>Status</th><th></th></tr></thead><tbody>
+      ${people.map(i => `<tr><td><b>${esc(i.name)}</b></td><td>${availabilityStatusLabel(i)}</td>
+        <td style="text-align:right"><button class="btn ghost small" data-prefill="${i.id}">Edit</button></td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="empty">No sensei yet.</div>'}`;
+  $('#main').onclick = async e => {
+    const btn = e.target.closest('[data-prefill]');
+    if (!btn) return;
+    const person = adm.instructors.find(i => i.id == btn.dataset.prefill);
+    if (!person) return;
+    let data;
+    try { data = await api(`/api/admin/instructors/${person.id}/availability`); }
+    catch (err) { toast(err.message); return; }
+    modal(`<h2>${esc(person.name)}</h2><p class="muted small">Mark the hours they can teach. Saving asks them to confirm.</p><div id="ag"></div>
+      <div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="asave">Save for them to confirm</button></div>`,
+    (bg, close) => {
+      const read = availabilityGrid($('#ag', bg), data.blocks || []);
+      $('#asave', bg).onclick = async () => {
+        try {
+          await api(`/api/admin/instructors/${person.id}/availability`, { method: 'PUT', body: { blocks: read() } });
+          close();
+          toast('Sent for them to confirm');
+          route();
+        } catch (err) { toast(err.message); }
+      };
+    });
+  };
 }
 
 function aTimeoff() {
