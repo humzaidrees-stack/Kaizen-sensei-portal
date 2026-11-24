@@ -27,9 +27,11 @@ for (const file of files) {
 }
 console.log(`Syntax OK (${files.length} files).`);
 
-// Humza approved applying the additive 006 migration on the shared database.
-// migrate.js records each file and will not reapply 001–005.
-if (process.env.DATABASE_URL) {
+// Preview and production share one Neon database. A preview build must not migrate it.
+// 006 was applied once, with approval, and is recorded in schema_migrations.
+if (process.env.VERCEL_ENV === 'preview') {
+  console.log('Preview build: skipped migrations so the shared production database is not changed.');
+} else if (process.env.DATABASE_URL) {
   const result = spawnSync(process.execPath, [path.join(root, 'db/migrate.js')], { stdio: 'inherit' });
   if (result.status !== 0) process.exit(result.status ?? 1);
 } else {
