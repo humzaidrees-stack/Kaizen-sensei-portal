@@ -479,6 +479,9 @@ route('POST', '/api/admin/schedule-drafts', 'manager', async (req, res, { user }
 
 route('POST', '/api/admin/schedule-history', 'manager', async (req, res) => {
   const body = await readBody(req);
+  if (process.env.VERCEL_ENV === 'preview') {
+    throw new HttpError(403, 'History import is off on preview. It would write to the production database.');
+  }
   const month = parseMonth(body.month);
   if (!month) bad('Pick a month.');
   if (!mbConfigured()) bad('Mindbody is not connected.');
@@ -631,7 +634,9 @@ route('POST', '/api/admin/shifts/:id/assign', 'desk', async (req, res, { params 
   if (!inst) bad('Pick an instructor.');
   let mb_note = null;
   const writable = s.class_id && !String(s.class_id).startsWith('csv:') && !String(s.class_id).startsWith('demo:');
-  if (writable && mbCanWrite()) {
+  if (process.env.VERCEL_ENV === 'preview') {
+    mb_note = 'Preview does not write to Mindbody.';
+  } else if (writable && mbCanWrite()) {
     if (!inst.mb_staff_id) mb_note = `Not updated in Mindbody: ${inst.name} has no Mindbody staff ID linked. Update the class by hand.`;
     else {
       try {

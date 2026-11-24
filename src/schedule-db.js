@@ -415,6 +415,7 @@ export function locationsFrom(classes) {
 // Called from the sync route. Creates at most one draft per location per target month.
 // Uses rows already stored. It does not call Mindbody.
 export async function ensureFifteenthDrafts(today = todayLocal()) {
+  if (process.env.VERCEL_ENV === 'preview') return { skipped: true, reason: 'preview' };
   const months = monthsForFifteenth(today);
   if (!months) return { skipped: true, reason: 'not_the_15th' };
   const patternClasses = await classesBetween(months.pattern.start, months.pattern.end);
