@@ -47,9 +47,10 @@ describe('monthly draft rules', () => {
       location: LOCATION,
       cancelled: false,
     }));
-    const pattern = patternFromClasses(patternClasses, LOCATION);
-    assert.deepEqual(pattern.map((s) => [s.dow, s.startTime, s.endTime]), [[0, '08:00', '09:00']]);
-    const projected = projectPattern(pattern, december.start, december.end, LOCATION);
+    const pattern = patternFromClasses(patternClasses, LOCATION, november);
+    assert.equal(pattern.dropped.length, 0);
+    assert.deepEqual(pattern.slots.map((s) => [s.dow, s.startTime, s.endTime]), [[0, '08:00', '09:00']]);
+    const projected = projectPattern(pattern.slots, december.start, december.end, LOCATION);
     const decemberMondays = eachDate(december.start, december.end).filter((d) => dowOf(d) === 0);
     assert.deepEqual(projected.map((s) => s.start), decemberMondays.map((d) => `${d}T08:00`));
     assert.equal(projected.some((s) => s.start.slice(11) !== '08:00'), false);
@@ -71,7 +72,8 @@ describe('monthly draft rules', () => {
     const slots = buildMonthDraft({
       patternClasses, targetClasses, instructors: [ana, bea], location: LOCATION,
       targetStart: december.start, targetEnd: december.end,
-    });
+      patternStart: november.start, patternEnd: november.end,
+    }).slots;
     const generated = slots.filter((s) => s.kind !== 'extra');
     assert.equal(generated.every((s) => s.start.endsWith('T08:00') && dowOf(s.date) === 0), true);
     assert.equal(generated.some((s) => s.kind === 'added'), false);
@@ -182,7 +184,80 @@ describe('monthly draft rules', () => {
       fixedClasses: fixed.slice(0, 6),
     });
     assert.equal(nobodyHeavy[0].proposedInstructorId, 2);
-    assert.match(nobodyHeavy[0].reason, /No sensei is at 7/);
+    assert.match(nobodyHeavy[0].reason, /Power Surge fallback/);
+  });
+
+  it('drops a weekday slot that did not recur in most weeks, and does not invent a time', () => {
+    const november = monthRange(2026, 11);
+    const december = monthRange(2026, 12);
+    const mondays = eachDate(november.start, november.end).filter((d) => dowOf(d) === 0);
+    assert.equal(mondays.length, 5);
+    const regular = mondays.slice(0, 3).map((date, i) => ({
+      id: `r${i}`, start: `${date}T08:00`, end: `${date}T09:00`,
+      name: 'Core Power', staffName: 'Ana', location: LOCATION, cancelled: false,
+    }));
+    const once = {
+      id: 'once', start: `${mondays[4]}T20:00`, end: `${mondays[4]}T21:00`,
+      name: 'Workshop', staffName: 'Bea', location: LOCATION, cancelled: false,
+    };
+    const pattern = patternFromClasses([...regular, once], LOCATION, november);
+    assert.equal(pattern.dropped.length, 1);
+    assert.equal(pattern.dropped[0].startTime, '20:00');
+    assert.deepEqual(pattern.slots.map((s) => s.startTime), ['08:00']);
+    const built = buildMonthDraft({
+      patternClasses: [...regular, once],
+      targetClasses: [],
+      instructors: [sensei(1, 'Ana', allWeekHours())],
+      location: LOCATION,
+      targetStart: december.start,
+      targetEnd: december.end,
+      patternStart: november.start,
+      patternEnd: november.end,
+    });
+    assert.equal(built.dropped, 1);
+    assert.equal(built.slots.some((s) => s.start.endsWith('T20:00')), false);
+    assert.equal(built.slots.every((s) => s.start.endsWith('T08:00')), true);
+  });
+
+  it('falls back to the normal rule for Power Surge when nobody is already at 7, and stays with Kaizen Sensei only if nobody is free', () => {
+    const ana = sensei(1, 'Ana', allWeekHours());
+    const bea = sensei(2, 'Bea', allWeekHours());
+    const surge = {
+      date: '2026-12-09', start: '2026-12-09T18:00', end: '2026-12-09T19:00',
+      name: 'Power Surge Mixed Gender', location: LOCATION, kind: 'fill', classId: 'ps',
+      currentStaffName: 'Kaizen Sensei', removed: false, pinned: false,
+    };
+    const usualClasses = ['2026-11-04', '2026-11-11', '2026-11-18'].map((date) => ({
+      id: date, start: `${date}T18:00`, end: `${date}T19:00`, name: 'Power Surge Mixed Gender',
+      staffId: '101', staffName: 'Ana', location: LOCATION, cancelled: false,
+    }));
+    const usualFallback = assignDraft([surge], {
+      instructors: [ana, bea],
+      patternClasses: usualClasses,
+      fixedClasses: [{ instructorId: 1, start: '2026-12-08T08:00', end: '2026-12-08T09:00' }],
+      location: LOCATION,
+    });
+    assert.equal(usualFallback[0].proposedInstructorId, 1);
+    assert.match(usualFallback[0].reason, /Power Surge fallback/);
+    assert.match(usualFallback[0].reason, /Usual/);
+
+    const lightFallback = assignDraft([surge], {
+      instructors: [ana, bea],
+      patternClasses: usualClasses,
+      fixedClasses: [8, 9, 10].map((hour) => ({
+        instructorId: 1, start: `2026-12-08T${String(hour).padStart(2, '0')}:00`, end: `2026-12-08T${String(hour + 1).padStart(2, '0')}:00`,
+      })),
+      location: LOCATION,
+    });
+    assert.equal(lightFallback[0].proposedInstructorId, 2);
+    assert.match(lightFallback[0].reason, /Power Surge fallback/);
+    assert.match(lightFallback[0].reason, /Lightest/);
+
+    const none = assignDraft([surge], {
+      instructors: [sensei(1, 'Ana', allWeekHours(), { confirmed: false })],
+    });
+    assert.equal(none[0].proposedInstructorId, null);
+    assert.match(none[0].reason, /Kaizen Sensei/);
   });
 
   it('lists creates and cancels and never turns publish into a Mindbody write', () => {

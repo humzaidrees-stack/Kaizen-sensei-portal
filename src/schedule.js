@@ -116,8 +116,19 @@ function sameLocation(a, b) {
   return normName(a) === normName(b);
 }
 
-// One entry per weekday + start + end + class name that occurred last month.
-export function patternFromClasses(classes, location) {
+function weekdayTotals(start, end) {
+  const totals = new Map();
+  for (const date of eachDate(start, end)) {
+    const dow = dowOf(date);
+    totals.set(dow, (totals.get(dow) || 0) + 1);
+  }
+  return totals;
+}
+
+// A slot is kept when it happened on more than half of that weekday in the source month.
+// One-offs are dropped. Times that remain are copied, not moved.
+export function patternFromClasses(classes, location, range) {
+  const totals = range?.start && range?.end ? weekdayTotals(range.start, range.end) : null;
   const grouped = new Map();
   for (const c of classes) {
     if (c.cancelled) continue;
@@ -132,17 +143,32 @@ export function patternFromClasses(classes, location) {
         startTime,
         endTime,
         names: new Map(),
+        dates: new Set(),
       });
     }
     const row = grouped.get(key);
+    row.dates.add(date);
     row.names.set(c.name, (row.names.get(c.name) || 0) + 1);
   }
-  return [...grouped.values()].map((row) => ({
-    dow: row.dow,
-    startTime: row.startTime,
-    endTime: row.endTime,
-    name: [...row.names.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0],
-  })).sort((a, b) => a.dow - b.dow || a.startTime.localeCompare(b.startTime) || a.name.localeCompare(b.name));
+  const slots = [];
+  const dropped = [];
+  for (const row of grouped.values()) {
+    const total = totals ? (totals.get(row.dow) || row.dates.size) : row.dates.size;
+    const entry = {
+      dow: row.dow,
+      startTime: row.startTime,
+      endTime: row.endTime,
+      name: [...row.names.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0],
+      weeks: row.dates.size,
+      weekdayCount: total,
+    };
+    if (row.dates.size > total / 2) slots.push(entry);
+    else dropped.push(entry);
+  }
+  const byTime = (a, b) => a.dow - b.dow || a.startTime.localeCompare(b.startTime) || a.name.localeCompare(b.name);
+  slots.sort(byTime);
+  dropped.sort(byTime);
+  return { slots, dropped };
 }
 
 export function projectPattern(pattern, targetStart, targetEnd, location) {
@@ -200,6 +226,13 @@ function pickTeacher(people, usualId, commits, slot, power) {
   const loads = new Map(people.map((i) => [i.id, loadOf(commits, i.id, week)]));
   const lightest = Math.min(...loads.values());
   const usual = usualId != null ? people.find((i) => i.id === usualId) : null;
+  const light = people.filter((i) => loads.get(i.id) === lightest).sort((a, b) => a.name.localeCompare(b.name));
+  const normal = () => {
+    if (usual && loads.get(usual.id) <= lightest + 1) {
+      return { id: usual.id, code: power ? 'power_surge_fallback_usual' : 'usual', load: loads.get(usual.id) };
+    }
+    return { id: light[0].id, code: power ? 'power_surge_fallback' : 'lightest', load: lightest };
+  };
   if (power) {
     const heavy = people.filter((i) => loads.get(i.id) >= 7);
     if (heavy.length) {
@@ -207,15 +240,12 @@ function pickTeacher(people, usualId, commits, slot, power) {
       if (usual && loads.get(usual.id) >= 7 && loads.get(usual.id) <= lightestHeavy + 1) {
         return { id: usual.id, code: 'power_surge', load: loads.get(usual.id) };
       }
-      const light = heavy.filter((i) => loads.get(i.id) === lightestHeavy).sort((a, b) => a.name.localeCompare(b.name));
-      return { id: light[0].id, code: 'power_surge', load: lightestHeavy };
+      const heavyLight = heavy.filter((i) => loads.get(i.id) === lightestHeavy).sort((a, b) => a.name.localeCompare(b.name));
+      return { id: heavyLight[0].id, code: 'power_surge', load: lightestHeavy };
     }
+    return normal();
   }
-  if (usual && loads.get(usual.id) <= lightest + 1) {
-    return { id: usual.id, code: 'usual', load: loads.get(usual.id) };
-  }
-  const light = people.filter((i) => loads.get(i.id) === lightest).sort((a, b) => a.name.localeCompare(b.name));
-  return { id: light[0].id, code: power ? 'power_surge_spread' : 'lightest', load: lightest };
+  return normal();
 }
 
 function reasonText(code, slot, teacher, load) {
@@ -224,7 +254,8 @@ function reasonText(code, slot, teacher, load) {
   if (code === 'usual') return `Usual ${when} teacher, within 1 class of the lightest week (${load} classes).`;
   if (code === 'lightest') return `Lightest week so far (${load} classes).`;
   if (code === 'power_surge') return `Power Surge goes first to ${teacher?.name || 'this sensei'}, who already has ${load} classes this week.`;
-  if (code === 'power_surge_spread') return `No sensei is at 7 classes this week yet. Lightest week so far (${load} classes).`;
+  if (code === 'power_surge_fallback_usual') return `Power Surge fallback. Usual ${when} teacher, within 1 class of the lightest week (${load} classes).`;
+  if (code === 'power_surge_fallback') return `Power Surge fallback. Lightest week so far (${load} classes).`;
   if (code === 'pinned') return 'Chosen by the manager.';
   return 'Assigned.';
 }
@@ -316,8 +347,13 @@ function metaFrom(c) {
 
 export function buildMonthDraft({
   patternClasses, targetClasses, instructors, timeoff = [], fixedClasses = [], location, targetStart, targetEnd,
+  patternStart, patternEnd,
 }) {
-  const pattern = patternFromClasses(patternClasses, location);
+  const { slots: pattern, dropped } = patternFromClasses(
+    patternClasses,
+    location,
+    patternStart && patternEnd ? { start: patternStart, end: patternEnd } : null,
+  );
   const projected = projectPattern(pattern, targetStart, targetEnd, location);
   const pool = targetClasses.filter((c) => !c.cancelled && (!location || sameLocation(c.location, location)));
   const used = new Set();
@@ -382,7 +418,12 @@ export function buildMonthDraft({
       proposedInstructorId: null,
     });
   }
-  return assignDraft(slots, { instructors, timeoff, fixedClasses, patternClasses, location });
+  const assigned = assignDraft(slots, { instructors, timeoff, fixedClasses, patternClasses, location });
+  return {
+    slots: assigned,
+    dropped: dropped.length,
+    droppedDates: projectPattern(dropped, targetStart, targetEnd, location).length,
+  };
 }
 
 function sameTeacher(slot, instructor) {

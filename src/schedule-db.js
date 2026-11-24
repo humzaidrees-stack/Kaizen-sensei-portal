@@ -302,7 +302,7 @@ export async function createDraft({ location, month, createdBy = null, source = 
   const ctx = await contextFor(shell);
   const patternHere = ctx.patternClasses.filter((c) => c.location && c.location.toLowerCase() === location.toLowerCase() && !c.cancelled);
   if (!patternHere.length && source === 'fifteenth') return null;
-  const slots = buildMonthDraft({
+  const built = buildMonthDraft({
     patternClasses: ctx.patternClasses,
     targetClasses: ctx.targetClasses,
     instructors: ctx.instructors,
@@ -311,7 +311,10 @@ export async function createDraft({ location, month, createdBy = null, source = 
     location,
     targetStart: target.start,
     targetEnd: target.end,
+    patternStart: pattern.start,
+    patternEnd: pattern.end,
   });
+  const slots = built.slots;
   return transaction(async () => {
     const again = await findOpenDraft(location, target.start);
     if (again) return again;
@@ -401,6 +404,29 @@ export async function pinSlot(draft, slotId, instructorId) {
 
 export async function discardDraft(draft) {
   await prepare(`UPDATE schedule_drafts SET status='discarded', updated_at=${STAMP} WHERE id=?`).run(draft.id);
+}
+
+// Replace the slots on an existing draft. Does not insert a second draft and does not call Mindbody.
+export async function rebuildDraft(draft) {
+  const ctx = await contextFor(draft);
+  const built = buildMonthDraft({
+    patternClasses: ctx.patternClasses,
+    targetClasses: ctx.targetClasses,
+    instructors: ctx.instructors,
+    timeoff: ctx.timeoff,
+    fixedClasses: ctx.fixedClasses,
+    location: draft.location,
+    targetStart: draft.target_start,
+    targetEnd: draft.target_end,
+    patternStart: draft.pattern_start,
+    patternEnd: draft.pattern_end,
+  });
+  await transaction(async () => {
+    await prepare('DELETE FROM schedule_draft_slots WHERE draft_id=?').run(draft.id);
+    await insertSlots(draft.id, built.slots);
+    await prepare(`UPDATE schedule_drafts SET updated_at=${STAMP} WHERE id=?`).run(draft.id);
+  });
+  return built;
 }
 
 export function locationsFrom(classes) {

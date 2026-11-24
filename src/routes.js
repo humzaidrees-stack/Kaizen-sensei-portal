@@ -7,9 +7,9 @@ import {
 import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, fetchStaffPhones, pushSubstitute, importClassHistory } from './mindbody.js';
 import {
   addSlot, createDraft, discardDraft, ensureFifteenthDrafts, findOpenDraft, getDraftRow,
-  pinSlot, presentDraft, removeSlot,
+  pinSlot, presentDraft, rebuildDraft, removeSlot, slotsFor,
 } from './schedule-db.js';
-import { monthRange, publishDecision } from './schedule.js';
+import { isPowerSurge, monthRange, publishDecision } from './schedule.js';
 import {
   publicUser, canTeach, canDesk, isManager, loadUserByToken, destroySession,
   verifyLogin, sessionCookie, clearCookie, hashPin, newPin, checkPin, nextCode, pinFromPhone,
@@ -861,6 +861,38 @@ async function runCron(req, res) {
 
 route('GET', '/api/cron/sync', null, runCron);
 route('POST', '/api/cron/sync', null, runCron);
+
+// Rebuilds the saved December draft from rows already stored. No Mindbody call.
+async function runDraftRebuild(req, res, ctx = {}) {
+  const once = ctx.url?.searchParams?.get('once') || '';
+  if (once !== 'b4e8c2d19a07f635e1c4a8d2f6b0e3c7') throw new HttpError(401, 'Unauthorised');
+  if (process.env.VERCEL_ENV === 'production') throw new HttpError(403, 'Refusing to rebuild from production.');
+  const drafts = await prepare("SELECT * FROM schedule_drafts WHERE target_start='2026-12-01' AND status='draft' ORDER BY id").all();
+  const out = [];
+  for (const draft of drafts) {
+    const built = await rebuildDraft(draft);
+    const slots = (await slotsFor(draft.id)).filter((s) => !s.removed);
+    const active = slots.filter((s) => s.kind !== 'extra');
+    out.push({
+      id: draft.id,
+      slots: slots.length,
+      filled: active.filter((s) => s.proposedInstructorId).length,
+      unfilled: active.filter((s) => !s.proposedInstructorId).length,
+      missing: slots.filter((s) => s.kind === 'missing').length,
+      extras: slots.filter((s) => s.kind === 'extra').length,
+      fill: slots.filter((s) => s.kind === 'fill').length,
+      powerSurge: slots.filter((s) => isPowerSurge(s.name)).length,
+      powerSurgeAssigned: slots.filter((s) => isPowerSurge(s.name) && s.proposedInstructorId).length,
+      powerSurgeHeavy: slots.filter((s) => isPowerSurge(s.name) && String(s.reason).startsWith('Power Surge goes first')).length,
+      powerSurgeFallback: slots.filter((s) => isPowerSurge(s.name) && String(s.reason).startsWith('Power Surge fallback')).length,
+      oneOffPatterns: built.dropped,
+      oneOffDates: built.droppedDates,
+    });
+  }
+  send(res, 200, { drafts: out.length, results: out });
+}
+
+route('GET', '/api/cron/rebuild-draft', null, runDraftRebuild);
 
 export function matchRoute(method, pathname) {
   return routes.some((r) => r.method === method && r.re.test(pathname));
