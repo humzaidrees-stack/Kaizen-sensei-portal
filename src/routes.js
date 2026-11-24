@@ -866,6 +866,7 @@ async function runHistoryImport(req, res, ctx = {}) {
   const onceOk = once.length > 20 && once === process.env.IMPORT_ONCE || once === 'k7f3c1a9e4b28d06f5a1c3e7b9d24f80a6c1e5b7';
   if (!cronAuthorized(req) && !onceOk) throw new HttpError(401, 'Unauthorised');
   if (process.env.VERCEL_ENV === 'production') throw new HttpError(403, 'Refusing to import from production.');
+  try {
   const from = '2026-11-01';
   const to = '2026-12-31';
   const imported = await importClassHistory(from, to);
@@ -909,6 +910,11 @@ async function runHistoryImport(req, res, ctx = {}) {
     },
     migrations,
   });
+  } catch (err) {
+    const message = String(err?.message || 'failed').slice(0, 240);
+    const safe = /key|password|postgres:|secret|bearer/i.test(message) ? 'Import failed.' : message;
+    throw new HttpError(502, safe);
+  }
 }
 
 route('GET', '/api/cron/sync', null, runCron);
