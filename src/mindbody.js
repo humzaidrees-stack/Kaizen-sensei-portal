@@ -153,6 +153,81 @@ export async function syncClasses() {
   return { classes: classes.length, ...(await reconcile()) };
 }
 
+// Schedule fields only. Client lists on the Mindbody payload are ignored.
+export function historyRowFromMindbody(k) {
+  return {
+    id: String(k.Id),
+    start: local(k.StartDateTime),
+    end: local(k.EndDateTime),
+    name: k.ClassDescription?.Name || 'Class',
+    staffId: k.Staff?.Id != null ? String(k.Staff.Id) : null,
+    staffName: staffName(k.Staff),
+    location: k.Location?.Name || null,
+    locationId: k.Location?.Id != null ? String(k.Location.Id) : null,
+    classScheduleId: k.ClassScheduleId != null ? String(k.ClassScheduleId) : null,
+    classDescriptionId: k.ClassDescription?.Id != null ? String(k.ClassDescription.Id) : null,
+    resourceId: k.Resource?.Id != null ? String(k.Resource.Id) : null,
+    capacity: k.MaxCapacity ?? null,
+    webCapacity: k.WebCapacity ?? null,
+    waitlistCapacity: k.WaitlistCapacity ?? null,
+    bookingStatus: k.BookingStatus || null,
+    staffPayRate: k.StaffPayRate ?? null,
+    booked: k.TotalBooked ?? null,
+    cancelled: !!k.IsCanceled,
+  };
+}
+
+async function fetchClassesBetween(start, end) {
+  const c = mbConfig();
+  const classes = [];
+  let offset = 0;
+  for (;;) {
+    const q = new URLSearchParams({
+      StartDateTime: `${start}T00:00:00`,
+      EndDateTime: `${end}T23:59:59`,
+      Limit: '200',
+      Offset: String(offset),
+    });
+    c.locations.forEach((l) => q.append('LocationIds', l));
+    const r = await raw(`/class/classes?${q}`);
+    const batch = r.Classes || [];
+    classes.push(...batch);
+    if (classes.length >= (r.PaginationResponse?.TotalResults ?? 0) || !batch.length) break;
+    offset += 200;
+  }
+  return classes;
+}
+
+// Read-only. Replaces class_history rows in the date range. Does not touch classes or Mindbody.
+export async function importClassHistory(start, end) {
+  const classes = await fetchClassesBetween(start, end);
+  const rows = classes.map(historyRowFromMindbody);
+  await transaction(async () => {
+    await prepare('DELETE FROM class_history WHERE substr(start,1,10) BETWEEN ? AND ?').run(start, end);
+    const ins = prepare(`INSERT INTO class_history(
+      id, start, "end", name, staff_id, staff_name, location, location_id, class_schedule_id,
+      class_description_id, resource_id, capacity, web_capacity, waitlist_capacity, booking_status,
+      staff_pay_rate, booked, cancelled
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET start=EXCLUDED.start, "end"=EXCLUDED."end", name=EXCLUDED.name,
+      staff_id=EXCLUDED.staff_id, staff_name=EXCLUDED.staff_name, location=EXCLUDED.location,
+      location_id=EXCLUDED.location_id, class_schedule_id=EXCLUDED.class_schedule_id,
+      class_description_id=EXCLUDED.class_description_id, resource_id=EXCLUDED.resource_id,
+      capacity=EXCLUDED.capacity, web_capacity=EXCLUDED.web_capacity,
+      waitlist_capacity=EXCLUDED.waitlist_capacity, booking_status=EXCLUDED.booking_status,
+      staff_pay_rate=EXCLUDED.staff_pay_rate, booked=EXCLUDED.booked, cancelled=EXCLUDED.cancelled,
+      synced_at=to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`);
+    for (const row of rows) {
+      await ins.run(
+        row.id, row.start, row.end, row.name, row.staffId, row.staffName, row.location, row.locationId,
+        row.classScheduleId, row.classDescriptionId, row.resourceId, row.capacity, row.webCapacity,
+        row.waitlistCapacity, row.bookingStatus, row.staffPayRate, row.booked, row.cancelled,
+      );
+    }
+  });
+  return { classes: rows.length, from: start, to: end };
+}
+
 // POST /class/substituteclassteacher — payroll follows the instructor who covers.
 export async function pushSubstitute(classId, staffId) {
   return raw('/class/substituteclassteacher', {

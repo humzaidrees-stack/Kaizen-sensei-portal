@@ -4,7 +4,7 @@ import { hashPin } from '../src/auth.js';
 
 export async function resetDb() {
   await migrate();
-  await prepare(`TRUNCATE alerts, claims, shifts, classes, unavailability, availability, sessions, login_attempts, instructors, settings RESTART IDENTITY CASCADE`).run();
+  await prepare(`TRUNCATE alerts, claims, shifts, classes, class_history, schedule_draft_slots, schedule_drafts, unavailability, availability, sessions, login_attempts, instructors, settings RESTART IDENTITY CASCADE`).run();
 }
 
 export async function makeUser({ code, name, role = 'sensei', pin = '1234', mbStaffId = null, mbName = null }) {

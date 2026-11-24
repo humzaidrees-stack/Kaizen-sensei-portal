@@ -417,9 +417,29 @@ function postShift() {
 }
 
 let weekFrom = null;
+let draftMonth = null;
+function monthKeyOf(date) {
+  const [year, month] = date.slice(0, 7).split('-').map(Number);
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+function shiftMonth(key, delta) {
+  const [year, month] = key.split('-').map(Number);
+  const next = new Date(Date.UTC(year, month - 1 + delta, 1));
+  return next.toISOString().slice(0, 7);
+}
+function monthTitle(key) {
+  const [year, month] = key.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
 async function aSchedule() {
   weekFrom = weekFrom || mondayOf(today);
+  draftMonth = draftMonth || shiftMonth(monthKeyOf(today), 1);
   const data = await api(`/api/admin/schedule?from=${weekFrom}`);
+  let draftPayload = null;
+  if (me.role === 'manager') {
+    try { draftPayload = await api(`/api/admin/schedule-drafts?month=${draftMonth}`); }
+    catch (err) { draftPayload = { error: err.message }; }
+  }
   const days = Array.from({ length: 7 }, (_, i) => addDays(weekFrom, i));
   $('#main').innerHTML = `${demoBanner()}
     <div class="head"><div><h1>Schedule</h1><p>As it stands in ${source === 'mindbody' ? 'Mindbody' : 'the loaded schedule'}, with who is away and what needs cover.</p></div>
@@ -433,10 +453,121 @@ async function aSchedule() {
         const who = c.shift?.status === 'filled' ? `${esc(c.shift.assigned)} (cover)` : c.placeholder ? 'Kaizen Sensei' : esc(c.instructor || c.staff_name || '');
         return `<div class="slot ${cls}"><b>${time(c.start)} ${esc(c.name)}</b><span class="who">${who}${c.away && c.shift?.status !== 'filled' ? ' · away' : ''}</span>${c.capacity ? `<span class="small muted">${c.booked ?? 0}/${c.capacity} booked</span>` : ''}</div>`;
       }).join('') || '<span class="small muted">No classes</span>'}</div>`;
-    }).join('')}</div>`;
+    }).join('')}</div>
+    ${me.role === 'manager' ? draftSection(draftPayload) : ''}`;
   $('#prev').onclick = () => { weekFrom = addDays(weekFrom, -7); aSchedule(); };
   $('#next').onclick = () => { weekFrom = addDays(weekFrom, 7); aSchedule(); };
   $('#this').onclick = () => { weekFrom = mondayOf(today); aSchedule(); };
+  if (me.role === 'manager') wireDraft(draftPayload);
+}
+
+function draftSection(payload) {
+  if (!payload) return '';
+  if (payload.error) return `<div class="card" style="margin-top:28px"><h2>Next month</h2><div class="error">${esc(payload.error)}</div></div>`;
+  if (payload.ready === false) return `<div class="card attn" style="margin-top:28px"><h2>Next month</h2><p>The draft tables are not on this database yet. Nothing has been created.</p></div>`;
+  const diff = payload.diff;
+  const draft = payload.draft;
+  const counts = diff ? `${diff.substitutes.length} teacher changes, ${diff.creates.length} to create later, ${diff.cancels.length} to cancel later, ${diff.unfilled.length} unfilled` : '';
+  return `<div class="card" style="margin-top:28px" id="draft">
+    <div class="head"><div><h2 style="margin:0">Draft for ${esc(monthTitle(draftMonth))}</h2>
+      <p>Built from the previous month's days and times. Publish does not write to Mindbody.</p></div>
+      <div class="btns"><button class="btn ghost small" id="dprev" type="button">Previous month</button><button class="btn ghost small" id="dnext" type="button">Next month</button></div></div>
+    ${draft ? `<p class="small">${esc(counts)}. Unfilled classes stay with Kaizen Sensei.</p>
+      <div class="btns" style="margin-bottom:14px"><button class="btn ghost small" id="dimport" type="button">Import previous month</button><button class="btn ghost small" id="ddiscard" type="button">Discard draft</button><button class="btn small" id="dpublish" type="button">Review publish</button></div>
+      ${diffBox(diff, payload.publish)}
+      <form id="dadd" class="grid" style="margin:14px 0">
+        <label class="field"><span>Date</span><input type="date" name="date" min="${draft.targetStart}" max="${draft.targetEnd}" required></label>
+        <div class="row"><label class="field"><span>Start</span><input type="time" name="start" required></label><label class="field"><span>End</span><input type="time" name="end" required></label></div>
+        <label class="field"><span>Class</span><input name="name" placeholder="Core Power" required></label>
+        <button class="btn" type="submit">Add class</button>
+      </form>
+      <div class="draft-list">${draftDays(draft)}</div>`
+      : `<p>No draft for this month yet. It uses last month's weekday, time and class, then suggests senseis from confirmed hours.</p>
+        <div class="btns"><button class="btn ghost" id="dimport" type="button">Import previous month</button><button class="btn" id="dbuild" type="button">Build draft</button></div>`}
+  </div>`;
+}
+function diffBox(diff, publish) {
+  if (!diff) return '';
+  const line = (title, rows) => rows.length ? `<p class="small"><b>${esc(title)}</b> ${rows.slice(0, 8).map(r => `${esc(r.date)} ${esc(r.time)} ${esc(r.name)}${r.from ? ` (${esc(r.from)} → ${esc(r.to)})` : ''}${r.booked ? `, ${r.booked} booked` : ''}`).join('; ')}${rows.length > 8 ? '…' : ''}</p>` : '';
+  return `<div class="card sand" style="margin:0 0 14px">
+    <span class="label">Diff, not sent</span>
+    <p class="small" style="margin:6px 0">${esc(publish?.message || 'Nothing is written to Mindbody.')}</p>
+    ${line('Teacher changes', diff.substitutes)}
+    ${line('Would create', diff.creates)}
+    ${line('Would cancel', diff.cancels)}
+    ${line('Unfilled, stays Kaizen Sensei', diff.unfilled)}
+    <p class="small muted">${diff.extras} extra classes left as they are. ${diff.unchanged} unchanged.</p>
+  </div>`;
+}
+function draftDays(draft) {
+  const days = [];
+  for (let d = draft.targetStart; d <= draft.targetEnd; d = addDays(d, 1)) {
+    const list = draft.slots.filter(s => s.date === d);
+    if (!list.length) continue;
+    days.push(`<div class="draft-day"><span class="label">${esc(dayName(d))} ${esc(dayShort(d))}</span>${list.map(draftSlot).join('')}</div>`);
+  }
+  return days.join('') || '<p class="small muted">No classes in this draft.</p>';
+}
+function draftSlot(s) {
+  const cls = s.removed ? 'removed' : s.kind === 'missing' ? 'missing' : s.kind === 'extra' ? 'extra' : (!s.proposedInstructorId ? 'open' : '');
+  const who = s.removed ? 'Removed' : (s.proposedName || 'Kaizen Sensei');
+  const choices = (s.options || []).map(o => `<option value="${o.id}" ${o.id === s.proposedInstructorId ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
+  const picker = s.kind === 'extra' || s.removed ? '' : `<div class="row" style="margin-top:6px">${choices ? `<select data-pin="${s.id}">${choices}</select>` : ''}<button class="btn ghost small" type="button" data-remove="${s.id}">Remove</button></div>`;
+  return `<div class="slot ${cls}"><b>${esc(s.start.slice(11, 16))} ${esc(s.name)}</b>
+    <span class="who">${esc(who)}${s.kind === 'missing' ? ' · missing in Mindbody' : ''}${s.kind === 'extra' ? ' · extra' : ''}${s.kind === 'added' ? ' · added' : ''}</span>
+    <span class="small muted">${esc(s.reason || '')}</span>
+    ${picker}
+  </div>`;
+}
+function wireDraft(payload) {
+  const go = (fn) => fn().catch(err => toast(err.message));
+  if ($('#dprev')) $('#dprev').onclick = () => { draftMonth = shiftMonth(draftMonth, -1); aSchedule(); };
+  if ($('#dnext')) $('#dnext').onclick = () => { draftMonth = shiftMonth(draftMonth, 1); aSchedule(); };
+  if ($('#dbuild')) $('#dbuild').onclick = () => go(async () => { await api('/api/admin/schedule-drafts', { method: 'POST', body: { month: draftMonth, location: 'Kaizen Pilates' } }); toast('Draft ready'); aSchedule(); });
+  if ($('#dimport')) $('#dimport').onclick = () => go(async () => {
+    const previous = shiftMonth(draftMonth, -1);
+    if (!await confirmBox('Import the previous month from Mindbody?', 'This reads class times and teachers only. It does not change Mindbody or email anyone. On the preview it writes the shared database.', 'Import')) return;
+    const result = await api('/api/admin/schedule-history', { method: 'POST', body: { month: previous } });
+    toast(`${result.classes} classes stored`);
+  });
+  if ($('#ddiscard')) $('#ddiscard').onclick = () => go(async () => {
+    if (!await confirmBox('Discard this draft?', 'The classes in Mindbody stay as they are.', 'Discard')) return;
+    await api(`/api/admin/schedule-drafts/${payload.draft.id}/discard`, { method: 'POST', body: {} });
+    toast('Draft discarded');
+    aSchedule();
+  });
+  if ($('#dpublish')) $('#dpublish').onclick = () => go(async () => {
+    const result = await api(`/api/admin/schedule-drafts/${payload.draft.id}/publish`, { method: 'POST', body: {} });
+    toast(result.message || 'Nothing was written to Mindbody');
+  });
+  if ($('#dadd')) $('#dadd').onsubmit = (e) => {
+    e.preventDefault();
+    const f = e.target;
+    go(async () => {
+      await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots`, { method: 'POST', body: { date: f.date.value, start: f.start.value, end: f.end.value, name: f.name.value } });
+      toast('Class added');
+      aSchedule();
+    });
+  };
+  $('#draft')?.addEventListener('change', (e) => {
+    const sel = e.target.closest('[data-pin]');
+    if (!sel || !sel.value) return;
+    go(async () => {
+      await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots/${sel.dataset.pin}`, { method: 'PUT', body: { instructor_id: Number(sel.value) } });
+      toast('Sensei updated');
+      aSchedule();
+    });
+  });
+  $('#draft')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-remove]');
+    if (!btn) return;
+    go(async () => {
+      if (!await confirmBox('Remove this class from the draft?', 'If it already exists in Mindbody, a later step would cancel it. Nothing is cancelled now.', 'Remove')) return;
+      await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots/${btn.dataset.remove}/remove`, { method: 'POST', body: {} });
+      toast('Removed from the draft');
+      aSchedule();
+    });
+  });
 }
 
 function availabilityStatusLabel(i) {
