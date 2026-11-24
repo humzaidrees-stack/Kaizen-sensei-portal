@@ -7,9 +7,9 @@ import {
 import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, fetchStaffPhones, pushSubstitute, importClassHistory } from './mindbody.js';
 import {
   addSlot, createDraft, discardDraft, ensureFifteenthDrafts, findOpenDraft, getDraftRow,
-  pinSlot, presentDraft, removeSlot,
+  pinSlot, presentDraft, removeSlot, slotsFor,
 } from './schedule-db.js';
-import { monthRange, publishDecision } from './schedule.js';
+import { isPowerSurge, monthRange, publishDecision } from './schedule.js';
 import {
   publicUser, canTeach, canDesk, isManager, loadUserByToken, destroySession,
   verifyLogin, sessionCookie, clearCookie, hashPin, newPin, checkPin, nextCode, pinFromPhone,
@@ -859,8 +859,60 @@ async function runCron(req, res) {
   send(res, 200, await withSyncLock(() => runScheduledSync()));
 }
 
+// One-off read of Mindbody class rows into class_history, then a December draft.
+// Not the sync route: it does not reconcile, notify, or write to Mindbody.
+async function runHistoryImport(req, res) {
+  if (!cronAuthorized(req)) throw new HttpError(401, 'Unauthorised');
+  if (process.env.VERCEL_ENV === 'production') throw new HttpError(403, 'Refusing to import from production.');
+  const from = '2026-11-01';
+  const to = '2026-12-31';
+  const imported = await importClassHistory(from, to);
+  const history = await prepare(`SELECT COUNT(*)::int AS n,
+      MIN(substr(start,1,10)) AS min_date,
+      MAX(substr(start,1,10)) AS max_date,
+      COUNT(DISTINCT location)::int AS locations,
+      COUNT(*) FILTER (WHERE cancelled)::int AS cancelled
+    FROM class_history`).get();
+  const top = await prepare(`SELECT location FROM class_history
+    WHERE substr(start,1,10) BETWEEN '2026-11-01' AND '2026-11-30'
+      AND cancelled=FALSE AND location IS NOT NULL
+    GROUP BY location ORDER BY COUNT(*) DESC LIMIT 1`).get();
+  const location = top?.location || 'Kaizen Pilates';
+  const draft = await createDraft({ location, month: '2026-12', source: 'manual' });
+  const slots = (await slotsFor(draft.id)).filter((s) => !s.removed);
+  const active = slots.filter((s) => s.kind !== 'extra');
+  const migrations = (await prepare('SELECT id FROM schema_migrations ORDER BY id').all()).map((row) => row.id);
+  send(res, 200, {
+    imported: { classes: imported.classes, from: imported.from, to: imported.to },
+    history: {
+      count: history.n,
+      min: history.min_date,
+      max: history.max_date,
+      locations: history.locations,
+      cancelled: history.cancelled,
+    },
+    classesTable: (await prepare('SELECT COUNT(*)::int AS n FROM classes').get()).n,
+    draft: {
+      id: draft.id,
+      month: '2026-12',
+      slots: slots.length,
+      filled: active.filter((s) => s.proposedInstructorId).length,
+      unfilled: active.filter((s) => !s.proposedInstructorId).length,
+      missing: slots.filter((s) => s.kind === 'missing').length,
+      extras: slots.filter((s) => s.kind === 'extra').length,
+      fill: slots.filter((s) => s.kind === 'fill').length,
+      powerSurge: slots.filter((s) => isPowerSurge(s.name)).length,
+      powerSurgeAssigned: slots.filter((s) => isPowerSurge(s.name) && s.proposedInstructorId).length,
+      powerSurgeNoHeavy: slots.filter((s) => isPowerSurge(s.name) && String(s.reason).startsWith('No sensei is at 7')).length,
+    },
+    migrations,
+  });
+}
+
 route('GET', '/api/cron/sync', null, runCron);
 route('POST', '/api/cron/sync', null, runCron);
+route('GET', '/api/cron/import-history', null, runHistoryImport);
+route('POST', '/api/cron/import-history', null, runHistoryImport);
 
 export function matchRoute(method, pathname) {
   return routes.some((r) => r.method === method && r.re.test(pathname));
