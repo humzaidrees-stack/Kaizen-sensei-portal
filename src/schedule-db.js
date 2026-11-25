@@ -3,11 +3,9 @@
 import { prepare, transaction } from './db.js';
 import { addDays, todayLocal } from './logic.js';
 import {
-  assignDraft, buildMonthDraft, explainUnfilled, hoursCover, matchSensei, monthRange,
-  monthsForFifteenth, normName, previousMonth, publishDecision, summarizeDraft, weekStart,
-  PLACEHOLDER_NAME,
+  assignDraft, buildMonthDraft, monthRange, monthsForFifteenth, previousMonth,
+  publishDecision, summarizeDraft, weekStart, PLACEHOLDER_NAME,
 } from './schedule.js';
-import { dowOf } from './logic.js';
 
 const STAMP = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`;
 
@@ -409,87 +407,6 @@ export async function discardDraft(draft) {
 }
 
 // Replace the slots on an existing draft. Does not insert a second draft and does not call Mindbody.
-const DAY = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const firstName = (name) => String(name || '').trim().split(/\s+/)[0];
-
-function historyKey(start, end, name) {
-  return `${dowOf(start.slice(0, 10))}|${start.slice(11, 16)}|${end.slice(11, 16)}|${normName(name)}`;
-}
-
-// Read-only look at why the saved December draft left slots with Kaizen Sensei.
-export async function diagnoseDecember() {
-  const draft = await prepare(
-    "SELECT * FROM schedule_drafts WHERE target_start='2026-12-01' AND status='draft' ORDER BY id LIMIT 1",
-  ).get();
-  if (!draft) return { error: 'no december draft' };
-  const ctx = await contextFor(draft);
-  const slots = await slotsFor(draft.id);
-  const explained = explainUnfilled({
-    slots,
-    instructors: ctx.instructors,
-    timeoff: ctx.timeoff,
-    fixedClasses: ctx.fixedClasses,
-  });
-  const primary = { no_availability: 0, overlap: 0, time_off: 0, power_surge: 0, other: 0 };
-  const secondary = {};
-  const clusters = new Map();
-  for (const row of explained) {
-    primary[row.primary] = (primary[row.primary] || 0) + 1;
-    for (const code of row.secondary) secondary[code] = (secondary[code] || 0) + 1;
-    const key = `${row.dow}|${row.time}|${row.type}`;
-    if (!clusters.has(key)) clusters.set(key, { weekday: DAY[row.dow], time: row.time, type: row.type, count: 0, primary: {} });
-    const cluster = clusters.get(key);
-    cluster.count += 1;
-    cluster.primary[row.primary] = (cluster.primary[row.primary] || 0) + 1;
-  }
-  const taught = new Map();
-  for (const row of ctx.patternClasses) {
-    if (row.cancelled) continue;
-    const who = matchSensei(row.staffId, row.staffName, ctx.instructors);
-    if (!who) continue;
-    const key = historyKey(row.start, row.end, row.name);
-    if (!taught.has(who.id)) taught.set(who.id, new Map());
-    const bag = taught.get(who.id);
-    bag.set(key, (bag.get(key) || 0) + 1);
-  }
-  const addHours = ctx.instructors.filter((i) => i.active).map((person) => {
-    let uncovered = 0;
-    let taughtSlots = 0;
-    let score = 0;
-    for (const row of explained) {
-      const start = `${row.date}T${row.time}`;
-      const end = `${row.date}T${row.end}`;
-      if (hoursCover(person.hours, start, end)) continue;
-      uncovered += 1;
-      const n = taught.get(person.id)?.get(historyKey(start, end, row.name)) || 0;
-      if (n) taughtSlots += 1;
-      score += 1 + n;
-    }
-    return { name: firstName(person.name), uncovered, taughtSlots, score };
-  }).filter((row) => row.uncovered).sort((a, b) => b.score - a.score || b.taughtSlots - a.taughtSlots || a.name.localeCompare(b.name));
-  const activePeople = ctx.instructors.filter((i) => i.active);
-  return {
-    unfilled: explained.length,
-    primary,
-    secondary,
-    sanity: {
-      mondayIsZero: dowOf('2026-12-07') === 0,
-      sundayIsSix: dowOf('2026-12-06') === 6,
-      dateMismatch: explained.filter((row) => !row.dateMatchesStart).length,
-      oneHour: explained.filter((row) => row.hours.length === 1).length,
-      spansHours: explained.filter((row) => row.hours.length > 1).length,
-    },
-    senseis: {
-      active: activePeople.length,
-      noRows: activePeople.filter((i) => !i.hours.size).map((i) => firstName(i.name)),
-      withRows: activePeople.filter((i) => i.hours.size).length,
-      rowsButUnconfirmed: activePeople.filter((i) => i.hours.size && !i.confirmed).map((i) => firstName(i.name)),
-    },
-    clusters: [...clusters.values()].sort((a, b) => b.count - a.count || a.weekday.localeCompare(b.weekday) || a.time.localeCompare(b.time)).slice(0, 12),
-    addHours: addHours.slice(0, 8),
-  };
-}
-
 export async function rebuildDraft(draft) {
   const ctx = await contextFor(draft);
   const built = buildMonthDraft({

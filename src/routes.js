@@ -7,7 +7,7 @@ import {
 import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, fetchStaffPhones, pushSubstitute, importClassHistory } from './mindbody.js';
 import {
   addSlot, createDraft, discardDraft, ensureFifteenthDrafts, findOpenDraft, getDraftRow,
-  diagnoseDecember, pinSlot, presentDraft, removeSlot,
+  pinSlot, presentDraft, removeSlot,
 } from './schedule-db.js';
 import { monthRange, publishDecision } from './schedule.js';
 import {
@@ -861,18 +861,6 @@ async function runCron(req, res) {
 
 route('GET', '/api/cron/sync', null, runCron);
 route('POST', '/api/cron/sync', null, runCron);
-
-// Temporary read-only look at unfilled December slots. SELECT only.
-async function runUnfilledDiag(req, res, ctx = {}) {
-  const once = ctx.url?.searchParams?.get('once') || '';
-  if (once !== 'c3f7a1e9b4d2086a5e1c7f3b9d4a6e80') throw new HttpError(401, 'Unauthorised');
-  if (process.env.VERCEL_ENV !== 'preview') throw new HttpError(403, 'Preview only.');
-  const host = String(req.headers.host || '').split(':')[0];
-  if (host === 'sensei.kaizenpilates.ae') throw new HttpError(403, 'Not on the production host.');
-  send(res, 200, await diagnoseDecember());
-}
-
-route('GET', '/api/cron/diagnose-unfilled', null, runUnfilledDiag);
 
 export function matchRoute(method, pathname) {
   return routes.some((r) => r.method === method && r.re.test(pathname));
