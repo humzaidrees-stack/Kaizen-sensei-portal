@@ -266,6 +266,97 @@ function withKindNote(slot, text) {
   return text;
 }
 
+function hoursNeeded(start, end) {
+  const s = toMin(start.slice(11));
+  const e = toMin(end.slice(11));
+  const hours = [];
+  if (!(e > s)) return hours;
+  for (let h = Math.floor(s / 60); h < Math.ceil(e / 60); h++) hours.push(h);
+  return hours;
+}
+
+function coversHours(person, slot, { confirmedOnly }) {
+  if (confirmedOnly && !person.confirmed) return false;
+  return hoursCover(person.hours, slot.start, slot.end);
+}
+
+function coversSomeHour(person, slot) {
+  if (!person.confirmed || !person.hours.size) return false;
+  const dow = dowOf(slot.date || slot.start.slice(0, 10));
+  const need = hoursNeeded(slot.start, slot.end);
+  const hit = need.filter((h) => person.hours.has(`${dow}-${h}`));
+  return hit.length > 0 && hit.length < need.length;
+}
+
+// Why a saved draft left a slot with Kaizen Sensei. Read-only. One primary cause.
+export function explainUnfilled({ slots, instructors, timeoff = [], fixedClasses = [] }) {
+  const active = instructors.filter((i) => i.active);
+  const commits = [];
+  for (const c of fixedClasses) {
+    const who = c.instructorId
+      ? active.find((i) => i.id === c.instructorId)
+      : matchSensei(c.staffId, c.staffName, active);
+    if (who) commits.push(commitOf(who.id, c.start, c.end));
+  }
+  for (const slot of slots) {
+    if (slot.removed || slot.kind !== 'extra') continue;
+    const who = matchSensei(slot.currentStaffId, slot.currentStaffName, active);
+    if (who) commits.push(commitOf(who.id, slot.start, slot.end));
+  }
+  for (const slot of slots) {
+    if (slot.removed || slot.kind === 'extra' || !slot.pinned || !slot.proposedInstructorId) continue;
+    commits.push(commitOf(slot.proposedInstructorId, slot.start, slot.end, slot.id));
+  }
+  const auto = slots.filter((s) => !s.removed && s.kind !== 'extra' && !s.pinned);
+  const ordered = [
+    ...auto.filter((s) => !isPowerSurge(s.name)).sort((a, b) => a.start.localeCompare(b.start) || a.name.localeCompare(b.name)),
+    ...auto.filter((s) => isPowerSurge(s.name)).sort((a, b) => a.start.localeCompare(b.start) || a.name.localeCompare(b.name)),
+  ];
+  const rows = [];
+  for (const slot of ordered) {
+    if (!slot.proposedInstructorId) rows.push(classifyUnfilled(slot, active, timeoff, commits));
+    else commits.push(commitOf(slot.proposedInstructorId, slot.start, slot.end, slot.id));
+  }
+  return rows;
+}
+
+function classifyUnfilled(slot, instructors, timeoff, commits) {
+  const power = isPowerSurge(slot.name);
+  const withHours = instructors.filter((i) => coversHours(i, slot, { confirmedOnly: true }));
+  const away = withHours.filter((i) => isAway(timeoff, i.id, slot.start, slot.end));
+  const notAway = withHours.filter((i) => !isAway(timeoff, i.id, slot.start, slot.end));
+  const overlapped = notAway.filter((i) => commits.some((c) => c.instructorId === i.id && overlaps(c.start, c.end, slot.start, slot.end)));
+  const free = notAway.filter((i) => !commits.some((c) => c.instructorId === i.id && overlaps(c.start, c.end, slot.start, slot.end)));
+  const secondary = [];
+  if (instructors.some((i) => coversSomeHour(i, slot))) secondary.push('partial_hour');
+  if (instructors.some((i) => !i.confirmed && i.hours.size && hoursCover(i.hours, slot.start, slot.end))) secondary.push('unconfirmed_has_hours');
+  let primary;
+  if (free.length) primary = power ? 'power_surge' : 'other';
+  else if (!withHours.length) primary = 'no_availability';
+  else if (!notAway.length) {
+    primary = 'time_off';
+    if (away.some((i) => commits.some((c) => c.instructorId === i.id && overlaps(c.start, c.end, slot.start, slot.end)))) secondary.push('also_overlap');
+  } else {
+    primary = 'overlap';
+    if (away.length) secondary.push('also_time_off');
+  }
+  if (power && primary !== 'power_surge') secondary.push('power_surge_slot');
+  const dow = dowOf(slot.date || slot.start.slice(0, 10));
+  return {
+    date: slot.date || slot.start.slice(0, 10),
+    time: slot.start.slice(11, 16),
+    end: slot.end.slice(11, 16),
+    dow,
+    hours: hoursNeeded(slot.start, slot.end),
+    type: String(slot.name || '').split(' - ')[0].trim(),
+    name: slot.name,
+    kind: slot.kind,
+    primary,
+    secondary,
+    dateMatchesStart: (slot.date || slot.start.slice(0, 10)) === slot.start.slice(0, 10),
+  };
+}
+
 function commitOf(instructorId, start, end, slotId = null) {
   return { instructorId, start, end, week: weekStart(start.slice(0, 10)), slotId };
 }

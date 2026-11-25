@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  assignDraft, buildMonthDraft, eachDate, hoursCover, isAway, monthRange, monthsForFifteenth,
-  patternFromClasses, projectPattern, publishDecision,   summarizeDraft,
+  assignDraft, buildMonthDraft, eachDate, explainUnfilled, hoursCover, isAway, monthRange,
+  monthsForFifteenth, patternFromClasses, projectPattern, publishDecision, summarizeDraft,
 } from '../src/schedule.js';
 import { dowOf } from '../src/logic.js';
 import { historyRowFromMindbody } from '../src/mindbody.js';
@@ -258,6 +258,46 @@ describe('monthly draft rules', () => {
     });
     assert.equal(none[0].proposedInstructorId, null);
     assert.match(none[0].reason, /Kaizen Sensei/);
+  });
+
+  it('classifies an unfilled slot by the first real blocker', () => {
+    const slot = {
+      date: '2026-12-07', start: '2026-12-07T08:00', end: '2026-12-07T09:00',
+      name: 'Core Power', location: LOCATION, kind: 'fill',
+      currentStaffName: 'Kaizen Sensei', removed: false, pinned: false, proposedInstructorId: null,
+    };
+    const open = explainUnfilled({
+      slots: [slot],
+      instructors: [sensei(1, 'Ana', ['0-9'])],
+    });
+    assert.equal(open[0].primary, 'no_availability');
+    assert.equal(open[0].dow, 0);
+    assert.deepEqual(open[0].hours, [8]);
+
+    const partial = explainUnfilled({
+      slots: [{ ...slot, start: '2026-12-07T06:30', end: '2026-12-07T07:30' }],
+      instructors: [sensei(1, 'Ana', ['0-6'])],
+    });
+    assert.equal(partial[0].primary, 'no_availability');
+    assert.ok(partial[0].secondary.includes('partial_hour'));
+    assert.deepEqual(partial[0].hours, [6, 7]);
+
+    const away = explainUnfilled({
+      slots: [slot],
+      instructors: [sensei(1, 'Ana', mondayHours())],
+      timeoff: [{ instructorId: 1, startDate: '2026-12-07', endDate: '2026-12-07' }],
+    });
+    assert.equal(away[0].primary, 'time_off');
+
+    const busy = explainUnfilled({
+      slots: [
+        { ...slot, proposedInstructorId: 1, start: '2026-12-07T07:00', end: '2026-12-07T08:30', name: 'Gentle Flow' },
+        slot,
+      ],
+      instructors: [sensei(1, 'Ana', mondayHours())],
+    });
+    const unfilled = busy.find((row) => row.time === '08:00');
+    assert.equal(unfilled.primary, 'overlap');
   });
 
   it('lists creates and cancels and never turns publish into a Mindbody write', () => {
