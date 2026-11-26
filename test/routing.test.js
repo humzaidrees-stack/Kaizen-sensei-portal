@@ -24,6 +24,7 @@ const FRONTEND_ROUTES = [
   ['GET', '/api/admin/schedule-drafts'],
   ['POST', '/api/admin/schedule-drafts'],
   ['POST', '/api/admin/schedule-history'],
+  ['PUT', '/api/admin/schedule-drafts/4/template'],
   ['POST', '/api/admin/schedule-drafts/4/slots'],
   ['POST', '/api/admin/schedule-drafts/4/slots/5/remove'],
   ['PUT', '/api/admin/schedule-drafts/4/slots/5'],

@@ -6,7 +6,7 @@ import {
 } from './logic.js';
 import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, fetchStaffPhones, pushSubstitute, importClassHistory } from './mindbody.js';
 import {
-  addSlot, createDraft, discardDraft, ensureFifteenthDrafts, findOpenDraft, getDraftRow,
+  addSlot, applyTemplate, createDraft, discardDraft, ensureFifteenthDrafts, findOpenDraft, getDraftRow,
   pinSlot, presentDraft, removeSlot,
 } from './schedule-db.js';
 import { monthRange, publishDecision } from './schedule.js';
@@ -492,6 +492,26 @@ route('POST', '/api/admin/schedule-history', 'manager', async (req, res) => {
   } catch (err) {
     if (missingTable(err)) throw new HttpError(503, 'Draft tables are not on this database yet.');
     throw new HttpError(502, err.message);
+  }
+});
+
+route('PUT', '/api/admin/schedule-drafts/:id/template', 'manager', async (req, res, { params }) => {
+  const draft = await getDraftRow(params.id);
+  if (!draft || draft.status !== 'draft') bad('Draft not found.');
+  const body = await readBody(req);
+  const time = String(body.time || '').slice(0, 5);
+  const end = String(body.end || '').slice(0, 5);
+  if (!isTime(time) || !isTime(end) || !String(body.name || '').trim()) bad('Pick a weekly class.');
+  if (body.dow == null || Number(body.dow) < 0 || Number(body.dow) > 6) bad('Pick a day.');
+  try {
+    const result = await applyTemplate(draft, {
+      dow: Number(body.dow), time, end, name: body.name, instructorId: body.instructor_id,
+    });
+    const view = await presentDraft(await getDraftRow(draft.id), req.headers.host || '');
+    send(res, 200, { ...view, kept: result.kept, applied: result.applied });
+  } catch (err) {
+    if (err.status) throw new HttpError(err.status, err.message);
+    throw err;
   }
 });
 

@@ -580,3 +580,136 @@ export function publishDecision({ flag, host }) {
     message: 'Phase 1 lists changes only. Nothing is written to Mindbody.',
   };
 }
+
+const SHORT_DAY = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+function classType(name) {
+  return String(name || '').split(' - ')[0].trim();
+}
+
+function modeSensei(list) {
+  const counts = new Map();
+  for (const slot of list) counts.set(slot.proposedInstructorId || 0, (counts.get(slot.proposedInstructorId || 0) || 0) + 1);
+  let chosen = 0;
+  let best = -1;
+  for (const [id, n] of counts) {
+    if (n > best || (n === best && chosen === 0 && id !== 0)) {
+      best = n;
+      chosen = id;
+    }
+  }
+  return chosen || null;
+}
+
+// Group per-date slots into one row per weekday/time/class, plus dates that differ.
+export function templateView(slots) {
+  const load = new Map();
+  for (const slot of slots) {
+    if (slot.proposedInstructorId) load.set(slot.proposedInstructorId, (load.get(slot.proposedInstructorId) || 0) + 1);
+  }
+  const groups = new Map();
+  const exceptions = [];
+  for (const slot of slots) {
+    if (slot.removed || slot.kind === 'extra' || slot.kind === 'added') {
+      exceptions.push(exceptionRow(slot, slot.removed ? 'Removed' : (slot.kind === 'extra' ? 'Extra' : 'Added')));
+      continue;
+    }
+    const dow = dowOf(slot.date);
+    const key = `${dow}|${slot.start.slice(11, 16)}|${slot.end.slice(11, 16)}|${normName(slot.name)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  }
+  const rows = [];
+  for (const [key, list] of groups) {
+    const senseiId = modeSensei(list);
+    const sample = list.find((s) => (s.proposedInstructorId || null) === senseiId) || list[0];
+    const filled = list.filter((s) => s.proposedInstructorId).length;
+    const votes = new Map();
+    for (const slot of list) {
+      for (const option of slot.options || []) {
+        const cur = votes.get(option.id) || { id: option.id, name: option.name, weeks: 0, load: load.get(option.id) || 0 };
+        cur.weeks += 1;
+        votes.set(option.id, cur);
+      }
+    }
+    const ranked = [...votes.values()].sort((a, b) => b.weeks - a.weeks || a.load - b.load || a.name.localeCompare(b.name));
+    if (senseiId && !ranked.some((o) => o.id === senseiId)) {
+      ranked.unshift({ id: senseiId, name: sample.proposedName || 'Sensei', weeks: filled, load: load.get(senseiId) || 0 });
+    }
+    const dow = dowOf(list[0].date);
+    rows.push({
+      key,
+      dow,
+      weekday: SHORT_DAY[dow],
+      time: list[0].start.slice(11, 16),
+      end: list[0].end.slice(11, 16),
+      name: list[0].name,
+      type: classType(list[0].name),
+      senseiId,
+      senseiName: senseiId ? (sample.proposedName || 'Sensei') : PLACEHOLDER_NAME,
+      total: list.length,
+      filled,
+      unfilled: list.length - filled,
+      suggested: ranked.slice(0, 5),
+      others: ranked.slice(5, 10),
+    });
+    for (const slot of list) {
+      if ((slot.proposedInstructorId || null) === senseiId) continue;
+      exceptions.push(exceptionRow(slot, slot.proposedInstructorId ? 'Different sensei' : 'Unfilled'));
+    }
+  }
+  rows.sort((a, b) => a.dow - b.dow || a.time.localeCompare(b.time) || a.type.localeCompare(b.type));
+  exceptions.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time));
+  const unfilled = slots.filter((s) => !s.removed && s.kind !== 'extra' && !s.proposedInstructorId).length;
+  return { rows, exceptions, unfilled };
+}
+
+function exceptionRow(slot, label) {
+  return {
+    id: slot.id,
+    date: slot.date,
+    time: slot.start.slice(11, 16),
+    end: slot.end.slice(11, 16),
+    name: slot.name,
+    type: classType(slot.name),
+    label,
+    kind: slot.kind,
+    removed: !!slot.removed,
+    senseiId: slot.proposedInstructorId || null,
+    senseiName: slot.proposedName || PLACEHOLDER_NAME,
+    options: (slot.options || []).slice(0, 8),
+    reason: slot.reason || '',
+  };
+}
+
+function changeKey(row) {
+  const date = row.date;
+  return `${dowOf(date)}|${row.time}|${normName(row.name)}`;
+}
+
+// Publish summary in the same shape as the week view: one line per recurring change, then one-offs.
+export function groupChanges(diff) {
+  const bucket = (rows, field) => {
+    const groups = new Map();
+    for (const row of rows || []) {
+      const key = changeKey(row);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    const templates = [];
+    const oneOffs = [];
+    for (const list of groups.values()) {
+      const same = field ? list.every((row) => row[field] === list[0][field]) : true;
+      if (list.length > 1 && same) templates.push({ ...list[0], weeks: list.length, weekday: SHORT_DAY[dowOf(list[0].date)] });
+      else oneOffs.push(...list.map((row) => ({ ...row, weekday: SHORT_DAY[dowOf(row.date)] })));
+    }
+    return { templates, oneOffs };
+  };
+  return {
+    substitutes: bucket(diff?.substitutes, 'to'),
+    creates: bucket(diff?.creates),
+    cancels: bucket(diff?.cancels),
+    unfilled: bucket(diff?.unfilled),
+  };
+}
+

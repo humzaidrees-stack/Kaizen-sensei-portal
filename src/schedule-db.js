@@ -1,10 +1,10 @@
 // Load schedule rows and store drafts. Reads classes and class_history.
 // Does not call Mindbody.
 import { prepare, transaction } from './db.js';
-import { addDays, todayLocal } from './logic.js';
+import { addDays, dowOf, todayLocal } from './logic.js';
 import {
-  assignDraft, buildMonthDraft, monthRange, monthsForFifteenth, previousMonth,
-  publishDecision, summarizeDraft, weekStart, PLACEHOLDER_NAME,
+  assignDraft, buildMonthDraft, monthRange, monthsForFifteenth, normName, previousMonth,
+  publishDecision, summarizeDraft, templateView, groupChanges, weekStart, PLACEHOLDER_NAME,
 } from './schedule.js';
 
 const STAMP = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`;
@@ -261,7 +261,9 @@ function publicSlot(slot, instructors) {
 export async function presentDraft(draft, host) {
   const slots = await slotsFor(draft.id);
   const instructors = await loadPeople();
+  const diff = summarizeDraft(slots, instructors);
   const gate = publishDecision({ flag: process.env.MB_SCHEDULE_PUBLISH, host: String(host || '').split(':')[0] });
+  const publicSlots = slots.map((slot) => publicSlot(slot, instructors));
   return {
     ready: true,
     draft: {
@@ -273,9 +275,11 @@ export async function presentDraft(draft, host) {
       patternEnd: draft.pattern_end,
       status: draft.status,
       source: draft.source,
-      slots: slots.map((slot) => publicSlot(slot, instructors)),
+      slots: publicSlots,
+      week: templateView(publicSlots),
     },
-    diff: summarizeDraft(slots, instructors),
+    diff,
+    changes: groupChanges(diff),
     publish: gate,
   };
 }
@@ -400,6 +404,41 @@ export async function pinSlot(draft, slotId, instructorId) {
     err.status = 400;
     throw err;
   }
+}
+
+// Set the same sensei on every date of one weekday/time/class. Dates they cannot teach stay as they are.
+export async function applyTemplate(draft, { dow, time, end, name, instructorId }) {
+  const teacherId = Number(instructorId);
+  const people = await loadPeople();
+  const teacher = people.find((i) => i.id === teacherId);
+  if (!teacher) {
+    const err = new Error('Pick a sensei.');
+    err.status = 400;
+    throw err;
+  }
+  const slots = await slotsFor(draft.id);
+  const targets = slots.filter((s) => !s.removed && s.kind !== 'extra'
+    && dowOf(s.date) === Number(dow)
+    && s.start.slice(11, 16) === time
+    && s.end.slice(11, 16) === end
+    && normName(s.name) === normName(name));
+  if (!targets.length) {
+    const err = new Error('That weekly class is not on this draft.');
+    err.status = 400;
+    throw err;
+  }
+  const ids = targets.map((s) => s.id);
+  const mark = prepare('UPDATE schedule_draft_slots SET proposed_instructor_id=?, pinned=TRUE WHERE draft_id=? AND id=?');
+  for (const id of ids) await mark.run(teacher.id, draft.id, id);
+  await recompute(draft);
+  const fresh = await slotsFor(draft.id);
+  const kept = fresh.filter((s) => ids.includes(s.id) && s.pinned && s.proposedInstructorId === teacher.id).length;
+  if (!kept) {
+    const err = new Error('That sensei is not free for any week of this class.');
+    err.status = 400;
+    throw err;
+  }
+  return { applied: targets.length, kept };
 }
 
 export async function discardDraft(draft) {

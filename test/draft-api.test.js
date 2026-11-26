@@ -97,4 +97,32 @@ describe('schedule draft API', { concurrency: 1 }, () => {
     assert.equal(extraTime.start, '2026-12-03T07:00');
     assert.equal(generated.some((s) => s.start.endsWith('T07:00')), false);
   });
+
+  it('applies one sensei to every date of a weekly class', async () => {
+    await resetDb();
+    const ana = await makeUser({ code: 'KP901', name: 'Ana Teacher', pin: '1111', mbStaffId: '91' });
+    await makeUser({ code: 'ADMIN9', name: 'Studio manager', role: 'manager', pin: '9999' });
+    await prepare("UPDATE instructors SET availability_confirmed_at='2026-11-01 00:00:00' WHERE id=?").run(ana.id);
+    for (let hour = 6; hour <= 20; hour++) {
+      await prepare('INSERT INTO availability(instructor_id, dow, hour) VALUES(?,?,?)').run(ana.id, 0, hour);
+    }
+    const draft = await prepare(`INSERT INTO schedule_drafts(location, target_start, target_end, pattern_start, pattern_end, source)
+      VALUES('Kaizen Pilates','2026-12-01','2026-12-31','2026-11-01','2026-11-30','manual') RETURNING id`).get();
+    for (const date of ['2026-12-07', '2026-12-14']) {
+      await prepare(`INSERT INTO schedule_draft_slots(draft_id, slot_date, start, "end", name, location, kind, reason, eligible_ids)
+        VALUES(?,?,?,?,?,'Kaizen Pilates','fill','Open','[]')`).run(draft.id, date, `${date}T08:00`, `${date}T09:00`, 'Core Power');
+    }
+    const manager = await api('/api/login', { method: 'POST', body: { code: 'ADMIN9', pin: '9999' } });
+    const applied = await api(`/api/admin/schedule-drafts/${draft.id}/template`, {
+      method: 'PUT', token: manager.cookie,
+      body: { dow: 0, time: '08:00', end: '09:00', name: 'Core Power', instructor_id: ana.id },
+    });
+    assert.equal(applied.status, 200);
+    assert.equal(applied.data.kept, 2);
+    const monday = applied.data.draft.week.rows.find((row) => row.time === '08:00' && row.weekday === 'Mon');
+    assert.equal(monday.total, 2);
+    assert.equal(monday.filled, 2);
+    assert.equal(monday.senseiId, ana.id);
+    assert.equal(applied.data.draft.week.unfilled, 0);
+  });
 });

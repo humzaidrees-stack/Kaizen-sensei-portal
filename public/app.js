@@ -465,71 +465,87 @@ function draftSection(payload) {
   if (!payload) return '';
   if (payload.error) return `<div class="card" style="margin-top:28px"><h2>Next month</h2><div class="error">${esc(payload.error)}</div></div>`;
   if (payload.ready === false) return `<div class="card attn" style="margin-top:28px"><h2>Next month</h2><p>The draft tables are not on this database yet. Nothing has been created.</p></div>`;
-  const diff = payload.diff;
   const draft = payload.draft;
-  const counts = diff ? `${diff.substitutes.length} teacher changes, ${diff.creates.length} to create later, ${diff.cancels.length} to cancel later, ${diff.unfilled.length} unfilled` : '';
+  const week = draft?.week;
+  const unfilled = week?.unfilled || 0;
   return `<div class="card" style="margin-top:28px" id="draft">
     <div class="head"><div><h2 style="margin:0">Draft for ${esc(monthTitle(draftMonth))}</h2>
-      <p>Built from the previous month's days and times. Publish does not write to Mindbody.</p></div>
-      <div class="btns"><button class="btn ghost small" id="dprev" type="button">Previous month</button><button class="btn ghost small" id="dnext" type="button">Next month</button></div></div>
-    ${draft ? `<p class="small">${esc(counts)}. Unfilled classes stay with Kaizen Sensei.</p>
-      <div class="btns" style="margin-bottom:14px"><button class="btn ghost small" id="dimport" type="button">Import previous month</button><button class="btn ghost small" id="ddiscard" type="button">Discard draft</button><button class="btn small" id="dpublish" type="button">Review publish</button></div>
-      ${diffBox(diff, payload.publish)}
-      <form id="dadd" class="grid" style="margin:14px 0">
+      <p>One row per weekly class. A choice applies to every date that month.</p></div>
+      <div class="btns"><button class="btn ghost small" id="dprev" type="button">Previous</button><button class="btn ghost small" id="dnext" type="button">Next</button></div></div>
+    ${draft ? `${unfilled ? `<p class="chip warm" style="display:inline-block;margin:0 0 12px">${unfilled} unfilled · Kaizen Sensei</p>` : '<p class="chip dark" style="display:inline-block;margin:0 0 12px">Every weekly class has a sensei</p>'}
+      <div class="btns" style="margin-bottom:14px"><button class="btn ghost small" id="ddiscard" type="button">Discard</button><button class="btn small" id="dpublish" type="button">Review publish</button></div>
+      ${diffBox(payload.changes, payload.publish, payload.diff)}
+      <div class="tpl-week">${templateDays(week)}</div>
+      <h3 style="margin:22px 0 8px">One-off changes</h3>
+      <p class="small muted" style="margin-top:0">Dates that don't follow the week above, plus extras and removed classes.</p>
+      ${exceptionList(week)}
+      <form id="dadd" class="tpl-add">
+        <p class="label">Add a one-off</p>
         <label class="field"><span>Date</span><input type="date" name="date" min="${draft.targetStart}" max="${draft.targetEnd}" required></label>
         <div class="row"><label class="field"><span>Start</span><input type="time" name="start" required></label><label class="field"><span>End</span><input type="time" name="end" required></label></div>
         <label class="field"><span>Class</span><input name="name" placeholder="Core Power" required></label>
-        <button class="btn" type="submit">Add class</button>
-      </form>
-      <div class="draft-list">${draftDays(draft)}</div>`
-      : `<p>No draft for this month yet. It uses last month's weekday, time and class, then suggests senseis from confirmed hours.</p>
-        <div class="btns"><button class="btn ghost" id="dimport" type="button">Import previous month</button><button class="btn" id="dbuild" type="button">Build draft</button></div>`}
+        <button class="btn" type="submit">Add</button>
+      </form>`
+      : `<p>No draft for this month yet.</p><button class="btn" id="dbuild" type="button">Build draft</button>`}
   </div>`;
 }
-function diffBox(diff, publish) {
-  if (!diff) return '';
-  const line = (title, rows) => rows.length ? `<p class="small"><b>${esc(title)}</b> ${rows.slice(0, 8).map(r => `${esc(r.date)} ${esc(r.time)} ${esc(r.name)}${r.from ? ` (${esc(r.from)} → ${esc(r.to)})` : ''}${r.booked ? `, ${r.booked} booked` : ''}`).join('; ')}${rows.length > 8 ? '…' : ''}</p>` : '';
-  return `<div class="card sand" style="margin:0 0 14px">
-    <span class="label">Diff, not sent</span>
-    <p class="small" style="margin:6px 0">${esc(publish?.message || 'Nothing is written to Mindbody.')}</p>
-    ${line('Teacher changes', diff.substitutes)}
-    ${line('Would create', diff.creates)}
-    ${line('Would cancel', diff.cancels)}
-    ${line('Unfilled, stays Kaizen Sensei', diff.unfilled)}
-    <p class="small muted">${diff.extras} extra classes left as they are. ${diff.unchanged} unchanged.</p>
-  </div>`;
+function shortType(name) {
+  const cut = String(name || '').split(' - ')[0].trim();
+  return cut.length > 32 ? `${cut.slice(0, 30)}…` : cut;
 }
-function draftDays(draft) {
-  const days = [];
-  for (let d = draft.targetStart; d <= draft.targetEnd; d = addDays(d, 1)) {
-    const list = draft.slots.filter(s => s.date === d);
-    if (!list.length) continue;
-    days.push(`<div class="draft-day"><span class="label">${esc(dayName(d))} ${esc(dayShort(d))}</span>${list.map(draftSlot).join('')}</div>`);
-  }
-  return days.join('') || '<p class="small muted">No classes in this draft.</p>';
+function senseiOptions(selected, suggested, others) {
+  const line = (o) => `<option value="${o.id}" ${Number(o.id) === Number(selected) ? 'selected' : ''}>${esc(o.name.split(' ')[0])}${o.load != null ? ` · ${o.load}` : ''}${o.weeks ? ` · ${o.weeks}w` : ''}</option>`;
+  const blank = selected ? '' : '<option value="" selected disabled>Kaizen Sensei</option>';
+  return `${blank}${suggested?.length ? `<optgroup label="Suggested">${suggested.map(line).join('')}</optgroup>` : ''}${others?.length ? `<optgroup label="Also free">${others.map(line).join('')}</optgroup>` : ''}`;
 }
-function draftSlot(s) {
-  const cls = s.removed ? 'removed' : s.kind === 'missing' ? 'missing' : s.kind === 'extra' ? 'extra' : (!s.proposedInstructorId ? 'open' : '');
-  const who = s.removed ? 'Removed' : (s.proposedName || 'Kaizen Sensei');
-  const choices = (s.options || []).map(o => `<option value="${o.id}" ${o.id === s.proposedInstructorId ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
-  const picker = s.kind === 'extra' || s.removed ? '' : `<div class="row" style="margin-top:6px">${choices ? `<select data-pin="${s.id}">${choices}</select>` : ''}<button class="btn ghost small" type="button" data-remove="${s.id}">Remove</button></div>`;
-  return `<div class="slot ${cls}"><b>${esc(s.start.slice(11, 16))} ${esc(s.name)}</b>
-    <span class="who">${esc(who)}${s.kind === 'missing' ? ' · missing in Mindbody' : ''}${s.kind === 'extra' ? ' · extra' : ''}${s.kind === 'added' ? ' · added' : ''}</span>
-    <span class="small muted">${esc(s.reason || '')}</span>
-    ${picker}
-  </div>`;
+function templateDays(week) {
+  if (!week?.rows?.length) return '<p class="small muted">No repeating classes.</p>';
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  return days.map((day) => {
+    const rows = week.rows.filter((r) => r.weekday === day);
+    if (!rows.length) return '';
+    return `<section class="tpl-day"><h3>${day}</h3>${rows.map((r) => `<div class="tpl-row ${r.unfilled ? 'open' : ''}">
+      <div><b>${esc(r.time)}</b><span class="tpl-meta">${r.filled} of ${r.total} filled</span></div>
+      <div><div class="tpl-title">${esc(r.type)}${r.unfilled ? ' <span class="chip warm">Kaizen Sensei</span>' : ''}</div>
+        <select class="tpl-select" data-template="1" data-dow="${r.dow}" data-time="${esc(r.time)}" data-end="${esc(r.end)}" data-name="${esc(r.name)}" aria-label="${esc(r.weekday)} ${esc(r.time)} ${esc(r.type)}">${senseiOptions(r.senseiId, r.suggested, r.others)}</select>
+      </div></div>`).join('')}</section>`;
+  }).join('');
+}
+function exceptionList(week) {
+  const rows = week?.exceptions || [];
+  if (!rows.length) return '<p class="small muted">None this month.</p>';
+  return `<div class="tpl-exceptions">${rows.map((r) => `<div class="tpl-row ${r.label === 'Unfilled' ? 'open' : ''} ${r.removed ? 'removed' : ''}">
+    <div><b>${esc(r.date.slice(8))} ${esc(r.time)}</b><span class="tpl-meta">${esc(r.label)}</span></div>
+    <div><div class="tpl-title">${esc(r.type)}${r.label === 'Unfilled' ? ' <span class="chip warm">Kaizen Sensei</span>' : ''}</div>
+      ${r.removed || r.kind === 'extra' ? `<span class="small muted">${esc(r.senseiName)}</span>` : `<select class="tpl-select" data-pin="${r.id}">${senseiOptions(r.senseiId, r.options, [])}</select>`}
+      ${r.removed ? '' : `<button class="btn ghost small" type="button" data-remove="${r.id}">Remove</button>`}
+    </div></div>`).join('')}</div>`;
+}
+function diffBox(changes, publish, diff) {
+  if (!changes && !diff) return '';
+  const bit = (block, title) => {
+    if (!block) return '';
+    const lines = [
+      ...(block.templates || []).slice(0, 4).map((r) => `${r.weekday} ${r.time} ${shortType(r.name)}${r.to ? ` → ${esc(r.to.split(' ')[0])}` : ''} · ${r.weeks} weeks`),
+      ...(block.oneOffs || []).slice(0, 4).map((r) => `${r.date?.slice(5) || ''} ${r.time} ${shortType(r.name)}${r.to ? ` → ${esc(r.to.split(' ')[0])}` : ''}`),
+    ];
+    if (!lines.length) return '';
+    return `<p class="small"><b>${esc(title)}</b><br>${lines.join('<br>')}</p>`;
+  };
+  return `<details class="tpl-diff"><summary>What would be sent later</summary>
+    <p class="small muted">${esc(publish?.message || 'Nothing is written to Mindbody.')}</p>
+    ${bit(changes?.substitutes, 'Weekly teacher changes')}
+    ${bit(changes?.creates, 'Would create')}
+    ${bit(changes?.cancels, 'Would cancel')}
+    ${bit(changes?.unfilled, 'Still Kaizen Sensei')}
+    <p class="small muted">${diff?.extras || 0} extras left as they are.</p>
+  </details>`;
 }
 function wireDraft(payload) {
   const go = (fn) => fn().catch(err => toast(err.message));
   if ($('#dprev')) $('#dprev').onclick = () => { draftMonth = shiftMonth(draftMonth, -1); aSchedule(); };
   if ($('#dnext')) $('#dnext').onclick = () => { draftMonth = shiftMonth(draftMonth, 1); aSchedule(); };
   if ($('#dbuild')) $('#dbuild').onclick = () => go(async () => { await api('/api/admin/schedule-drafts', { method: 'POST', body: { month: draftMonth, location: 'Kaizen Pilates' } }); toast('Draft ready'); aSchedule(); });
-  if ($('#dimport')) $('#dimport').onclick = () => go(async () => {
-    const previous = shiftMonth(draftMonth, -1);
-    if (!await confirmBox('Import the previous month from Mindbody?', 'This reads class times and teachers only. It does not change Mindbody or email anyone. On the preview it writes the shared database.', 'Import')) return;
-    const result = await api('/api/admin/schedule-history', { method: 'POST', body: { month: previous } });
-    toast(`${result.classes} classes stored`);
-  });
   if ($('#ddiscard')) $('#ddiscard').onclick = () => go(async () => {
     if (!await confirmBox('Discard this draft?', 'The classes in Mindbody stay as they are.', 'Discard')) return;
     await api(`/api/admin/schedule-drafts/${payload.draft.id}/discard`, { method: 'POST', body: {} });
@@ -545,16 +561,25 @@ function wireDraft(payload) {
     const f = e.target;
     go(async () => {
       await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots`, { method: 'POST', body: { date: f.date.value, start: f.start.value, end: f.end.value, name: f.name.value } });
-      toast('Class added');
+      toast('One-off added');
       aSchedule();
     });
   };
   $('#draft')?.addEventListener('change', (e) => {
-    const sel = e.target.closest('[data-pin]');
+    const sel = e.target.closest('select');
     if (!sel || !sel.value) return;
+    if (sel.dataset.template) {
+      go(async () => {
+        const result = await api(`/api/admin/schedule-drafts/${payload.draft.id}/template`, { method: 'PUT', body: { dow: Number(sel.dataset.dow), time: sel.dataset.time, end: sel.dataset.end, name: sel.dataset.name, instructor_id: Number(sel.value) } });
+        toast(result.kept === result.applied ? 'Applied to every week' : `Applied to ${result.kept} of ${result.applied} weeks`);
+        aSchedule();
+      });
+      return;
+    }
+    if (!sel.dataset.pin) return;
     go(async () => {
       await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots/${sel.dataset.pin}`, { method: 'PUT', body: { instructor_id: Number(sel.value) } });
-      toast('Sensei updated');
+      toast('That date was updated');
       aSchedule();
     });
   });
@@ -562,9 +587,9 @@ function wireDraft(payload) {
     const btn = e.target.closest('[data-remove]');
     if (!btn) return;
     go(async () => {
-      if (!await confirmBox('Remove this class from the draft?', 'If it already exists in Mindbody, a later step would cancel it. Nothing is cancelled now.', 'Remove')) return;
+      if (!await confirmBox('Remove this date?', 'It leaves the weekly row and would be cancelled later if Mindbody already has it. Nothing is cancelled now.', 'Remove')) return;
       await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots/${btn.dataset.remove}/remove`, { method: 'POST', body: {} });
-      toast('Removed from the draft');
+      toast('Removed');
       aSchedule();
     });
   });

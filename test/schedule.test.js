@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  assignDraft, buildMonthDraft, eachDate, explainUnfilled, hoursCover, isAway, monthRange,
-  monthsForFifteenth, patternFromClasses, projectPattern, publishDecision, summarizeDraft,
+  assignDraft, buildMonthDraft, eachDate, explainUnfilled, groupChanges, hoursCover, isAway, monthRange,
+  monthsForFifteenth, patternFromClasses, projectPattern, publishDecision, summarizeDraft, templateView,
 } from '../src/schedule.js';
 import { dowOf } from '../src/logic.js';
 import { historyRowFromMindbody } from '../src/mindbody.js';
@@ -298,6 +298,44 @@ describe('monthly draft rules', () => {
     });
     const unfilled = busy.find((row) => row.time === '08:00');
     assert.equal(unfilled.primary, 'overlap');
+  });
+
+  it('shows one weekly row and lists only the dates that differ', () => {
+    const base = (date, id, who) => ({
+      id, date, start: `${date}T08:00`, end: `${date}T09:00`, name: 'Core Power Mixed Gender - Medium',
+      kind: 'fill', removed: false, proposedInstructorId: who, proposedName: who === 1 ? 'Ana Teacher' : 'Kaizen Sensei',
+      options: [{ id: 1, name: 'Ana Teacher' }, { id: 2, name: 'Bea Teacher' }],
+    });
+    const view = templateView([
+      base('2026-12-07', 1, 1),
+      base('2026-12-14', 2, 1),
+      base('2026-12-21', 3, 1),
+      base('2026-12-28', 4, null),
+      { id: 9, date: '2026-12-03', start: '2026-12-03T11:00', end: '2026-12-03T12:00', name: 'Workshop', kind: 'extra', removed: false, proposedName: 'Bea Teacher', options: [] },
+    ]);
+    assert.equal(view.rows.length, 1);
+    assert.equal(view.rows[0].weekday, 'Mon');
+    assert.equal(view.rows[0].time, '08:00');
+    assert.equal(view.rows[0].senseiId, 1);
+    assert.equal(view.rows[0].filled, 3);
+    assert.equal(view.rows[0].total, 4);
+    assert.equal(view.unfilled, 1);
+    assert.equal(view.exceptions.length, 2);
+    assert.equal(view.exceptions.some((row) => row.label === 'Unfilled' && row.date === '2026-12-28'), true);
+    assert.equal(view.exceptions.some((row) => row.label === 'Extra'), true);
+    assert.equal(view.rows[0].suggested[0].weeks >= view.rows[0].suggested[1].weeks, true);
+    const grouped = groupChanges({
+      substitutes: [
+        { date: '2026-12-07', time: '08:00', name: 'Core Power', to: 'Ana' },
+        { date: '2026-12-14', time: '08:00', name: 'Core Power', to: 'Ana' },
+        { date: '2026-12-08', time: '09:00', name: 'Gentle Flow', to: 'Bea' },
+      ],
+      creates: [], cancels: [], unfilled: [{ date: '2026-12-28', time: '08:00', name: 'Core Power' }],
+    });
+    assert.equal(grouped.substitutes.templates.length, 1);
+    assert.equal(grouped.substitutes.templates[0].weeks, 2);
+    assert.equal(grouped.substitutes.oneOffs.length, 1);
+    assert.equal(grouped.unfilled.oneOffs.length, 1);
   });
 
   it('lists creates and cancels and never turns publish into a Mindbody write', () => {
