@@ -165,6 +165,24 @@ details[open] summary { margin-bottom: 8px; }
 .slot.open { background: var(--attention); border-color: var(--porcelain); }
 .slot.filled { background: var(--sand); border-color: var(--sand); }
 .slot.cancelled { opacity: .45; text-decoration: line-through; }
+.slot.missing { border-color: var(--porcelain); }
+.slot.extra { background: var(--sand); }
+.slot.removed { opacity: .45; text-decoration: line-through; }
+.draft-list { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.draft-day { display: flex; flex-direction: column; gap: 6px; }
+.tpl-week { display: flex; flex-direction: column; gap: 8px; }
+.tpl-day h3 { margin: 14px 0 4px; font-size: 15px; }
+.tpl-row { display: grid; grid-template-columns: 72px 1fr; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--hair); }
+.tpl-row.open { background: var(--attention); margin: 0 -8px; padding: 8px; border-radius: 10px; border-bottom: 0; }
+.tpl-meta { display: block; font-size: 12px; color: var(--porcelain); }
+.tpl-title { font-size: 14px; margin-bottom: 4px; }
+.tpl-select { width: 100%; min-height: 40px; font-size: 14px; }
+.tpl-add { margin-top: 16px; }
+.tpl-diff { margin: 0 0 14px; }
+.tpl-diff summary { cursor: pointer; font-weight: 700; }
+@media (min-width: 800px) {
+  .tpl-week { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 28px; align-items: start; }
+}
 
 /* ---------- table ---------- */
 table { width: 100%; border-collapse: collapse; font-size: 14px; }

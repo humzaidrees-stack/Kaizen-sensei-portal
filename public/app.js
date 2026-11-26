@@ -71,7 +71,7 @@ function modal(html, onMount) {
   return close;
 }
 const confirmBox = (title, text, yes = 'Confirm') => new Promise(res => {
-  modal(`<h2>${esc(title)}</h2><p class="muted">${esc(text)}</p><div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="yes">${esc(yes)}</button></div>`,
+  modal(`<h2>${esc(title)}</h2><p class="muted" style="white-space:pre-wrap">${esc(text)}</p><div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="yes">${esc(yes)}</button></div>`,
     (bg, close) => { $('#yes', bg).onclick = () => { close(); res(true); }; bg.addEventListener('click', e => { if (e.target === bg || e.target.closest('[data-close]')) res(false); }); });
 });
 
@@ -417,9 +417,29 @@ function postShift() {
 }
 
 let weekFrom = null;
+let draftMonth = null;
+function monthKeyOf(date) {
+  const [year, month] = date.slice(0, 7).split('-').map(Number);
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+function shiftMonth(key, delta) {
+  const [year, month] = key.split('-').map(Number);
+  const next = new Date(Date.UTC(year, month - 1 + delta, 1));
+  return next.toISOString().slice(0, 7);
+}
+function monthTitle(key) {
+  const [year, month] = key.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
 async function aSchedule() {
   weekFrom = weekFrom || mondayOf(today);
+  draftMonth = draftMonth || shiftMonth(monthKeyOf(today), 1);
   const data = await api(`/api/admin/schedule?from=${weekFrom}`);
+  let draftPayload = null;
+  if (me.role === 'manager') {
+    try { draftPayload = await api(`/api/admin/schedule-drafts?month=${draftMonth}`); }
+    catch (err) { draftPayload = { error: err.message }; }
+  }
   const days = Array.from({ length: 7 }, (_, i) => addDays(weekFrom, i));
   $('#main').innerHTML = `${demoBanner()}
     <div class="head"><div><h1>Schedule</h1><p>As it stands in ${source === 'mindbody' ? 'Mindbody' : 'the loaded schedule'}, with who is away and what needs cover.</p></div>
@@ -433,10 +453,164 @@ async function aSchedule() {
         const who = c.shift?.status === 'filled' ? `${esc(c.shift.assigned)} (cover)` : c.placeholder ? 'Kaizen Sensei' : esc(c.instructor || c.staff_name || '');
         return `<div class="slot ${cls}"><b>${time(c.start)} ${esc(c.name)}</b><span class="who">${who}${c.away && c.shift?.status !== 'filled' ? ' · away' : ''}</span>${c.capacity ? `<span class="small muted">${c.booked ?? 0}/${c.capacity} booked</span>` : ''}</div>`;
       }).join('') || '<span class="small muted">No classes</span>'}</div>`;
-    }).join('')}</div>`;
+    }).join('')}</div>
+    ${me.role === 'manager' ? draftSection(draftPayload) : ''}`;
   $('#prev').onclick = () => { weekFrom = addDays(weekFrom, -7); aSchedule(); };
   $('#next').onclick = () => { weekFrom = addDays(weekFrom, 7); aSchedule(); };
   $('#this').onclick = () => { weekFrom = mondayOf(today); aSchedule(); };
+  if (me.role === 'manager') wireDraft(draftPayload);
+}
+
+function draftSection(payload) {
+  if (!payload) return '';
+  if (payload.error) return `<div class="card" style="margin-top:28px"><h2>Next month</h2><div class="error">${esc(payload.error)}</div></div>`;
+  if (payload.ready === false) return `<div class="card attn" style="margin-top:28px"><h2>Next month</h2><p>The draft tables are not on this database yet. Nothing has been created.</p></div>`;
+  const draft = payload.draft;
+  const week = draft?.week;
+  const unfilled = week?.unfilled || 0;
+  const canPublish = payload.publish?.writes === true;
+  return `<div class="card" style="margin-top:28px" id="draft">
+    <div class="head"><div><h2 style="margin:0">Draft for ${esc(monthTitle(draftMonth))}</h2>
+      <p>One row per weekly class. A choice applies to every date that month.</p></div>
+      <div class="btns"><button class="btn ghost small" id="dprev" type="button">Previous</button><button class="btn ghost small" id="dnext" type="button">Next</button></div></div>
+    <p class="banner">${esc(canPublish ? 'Publish changes the teacher on classes that already exist. New classes and cancellations are not sent. Unfilled classes stay as they are in Mindbody.' : (payload.publish?.message || 'Review only, publishing to Mindbody is off'))}</p>
+    ${draft ? `${unfilled ? `<p class="chip warm" style="display:inline-block;margin:0 0 12px">${unfilled} unfilled · Kaizen Sensei</p>` : '<p class="chip dark" style="display:inline-block;margin:0 0 12px">Every weekly class has a sensei</p>'}
+      <div class="btns" style="margin-bottom:14px"><button class="btn ghost small" id="ddiscard" type="button">Discard</button>${canPublish ? '<button class="btn small" id="dpublish" type="button">Publish</button>' : ''}</div>
+      ${diffBox(payload.changes, payload.publish, payload.diff)}
+      <div class="tpl-week">${templateDays(week)}</div>
+      <h3 style="margin:22px 0 8px">One-off changes</h3>
+      <p class="small muted" style="margin-top:0">Dates that don't follow the week above, plus extras and removed classes.</p>
+      ${exceptionList(week)}
+      <form id="dadd" class="tpl-add">
+        <p class="label">Add a one-off</p>
+        <label class="field"><span>Date</span><input type="date" name="date" min="${draft.targetStart}" max="${draft.targetEnd}" required></label>
+        <div class="row"><label class="field"><span>Start</span><input type="time" name="start" required></label><label class="field"><span>End</span><input type="time" name="end" required></label></div>
+        <label class="field"><span>Class</span><input name="name" placeholder="Core Power" required></label>
+        <button class="btn" type="submit">Add</button>
+      </form>`
+      : `<p>No draft for this month yet.</p><button class="btn" id="dbuild" type="button">Build draft</button>`}
+  </div>`;
+}
+function shortType(name) {
+  const cut = String(name || '').split(' - ')[0].trim();
+  return cut.length > 32 ? `${cut.slice(0, 30)}…` : cut;
+}
+function senseiOptions(selected, suggested, others) {
+  const line = (o) => `<option value="${o.id}" ${Number(o.id) === Number(selected) ? 'selected' : ''}>${esc(o.name.split(' ')[0])}${o.load != null ? ` · ${o.load}` : ''}${o.weeks ? ` · ${o.weeks}w` : ''}</option>`;
+  const blank = selected ? '' : '<option value="" selected disabled>Kaizen Sensei</option>';
+  return `${blank}${suggested?.length ? `<optgroup label="Suggested">${suggested.map(line).join('')}</optgroup>` : ''}${others?.length ? `<optgroup label="Also free">${others.map(line).join('')}</optgroup>` : ''}`;
+}
+function templateDays(week) {
+  if (!week?.rows?.length) return '<p class="small muted">No repeating classes.</p>';
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  return days.map((day) => {
+    const rows = week.rows.filter((r) => r.weekday === day);
+    if (!rows.length) return '';
+    return `<section class="tpl-day"><h3>${day}</h3>${rows.map((r) => `<div class="tpl-row ${r.unfilled ? 'open' : ''}">
+      <div><b>${esc(r.time)}</b><span class="tpl-meta">${r.filled} of ${r.total} filled</span></div>
+      <div><div class="tpl-title">${esc(r.type)}${r.unfilled ? ' <span class="chip warm">Kaizen Sensei</span>' : ''}</div>
+        <select class="tpl-select" data-template="1" data-dow="${r.dow}" data-time="${esc(r.time)}" data-end="${esc(r.end)}" data-name="${esc(r.name)}" aria-label="${esc(r.weekday)} ${esc(r.time)} ${esc(r.type)}">${senseiOptions(r.senseiId, r.suggested, r.others)}</select>
+      </div></div>`).join('')}</section>`;
+  }).join('');
+}
+function exceptionList(week) {
+  const rows = week?.exceptions || [];
+  if (!rows.length) return '<p class="small muted">None this month.</p>';
+  return `<div class="tpl-exceptions">${rows.map((r) => `<div class="tpl-row ${r.label === 'Unfilled' ? 'open' : ''} ${r.removed ? 'removed' : ''}">
+    <div><b>${esc(r.date.slice(8))} ${esc(r.time)}</b><span class="tpl-meta">${esc(r.label)}</span></div>
+    <div><div class="tpl-title">${esc(r.type)}${r.label === 'Unfilled' ? ' <span class="chip warm">Kaizen Sensei</span>' : ''}</div>
+      ${r.removed || r.kind === 'extra' ? `<span class="small muted">${esc(r.senseiName)}</span>` : `<select class="tpl-select" data-pin="${r.id}">${senseiOptions(r.senseiId, r.options, [])}</select>`}
+      ${r.removed ? '' : `<button class="btn ghost small" type="button" data-remove="${r.id}">Remove</button>`}
+    </div></div>`).join('')}</div>`;
+}
+function diffBox(changes, publish, diff) {
+  if (!changes && !diff) return '';
+  const bit = (block, title) => {
+    if (!block) return '';
+    const lines = [
+      ...(block.templates || []).slice(0, 4).map((r) => `${r.weekday} ${r.time} ${shortType(r.name)}${r.to ? ` → ${esc(r.to.split(' ')[0])}` : ''} · ${r.weeks} weeks`),
+      ...(block.oneOffs || []).slice(0, 4).map((r) => `${r.date?.slice(5) || ''} ${r.time} ${shortType(r.name)}${r.to ? ` → ${esc(r.to.split(' ')[0])}` : ''}`),
+    ];
+    if (!lines.length) return '';
+    return `<p class="small"><b>${esc(title)}</b><br>${lines.join('<br>')}</p>`;
+  };
+  return `<details class="tpl-diff"><summary>${publish?.writes ? 'What publish will send' : 'What would be sent later'}</summary>
+    <p class="small muted">${esc(publish?.message || 'Nothing is written to Mindbody.')}</p>
+    <p class="small muted">${diff?.unfilled?.length || 0} unfilled stay as they are in Mindbody and are not sent.</p>
+    <p class="small muted">New classes and cancellations are not sent in this version.</p>
+    ${bit(changes?.substitutes, 'Weekly teacher changes')}
+    ${bit(changes?.creates, 'Would create')}
+    ${bit(changes?.cancels, 'Would cancel')}
+    ${bit(changes?.unfilled, 'Still Kaizen Sensei')}
+    <p class="small muted">${diff?.extras || 0} extras left as they are.</p>
+  </details>`;
+}
+function wireDraft(payload) {
+  const go = (fn) => fn().catch(err => toast(err.message));
+  if ($('#dprev')) $('#dprev').onclick = () => { draftMonth = shiftMonth(draftMonth, -1); aSchedule(); };
+  if ($('#dnext')) $('#dnext').onclick = () => { draftMonth = shiftMonth(draftMonth, 1); aSchedule(); };
+  if ($('#dbuild')) $('#dbuild').onclick = () => go(async () => { await api('/api/admin/schedule-drafts', { method: 'POST', body: { month: draftMonth, location: 'Kaizen Pilates' } }); toast('Draft ready'); aSchedule(); });
+  if ($('#ddiscard')) $('#ddiscard').onclick = () => go(async () => {
+    if (!await confirmBox('Discard this draft?', 'The classes in Mindbody stay as they are.', 'Discard')) return;
+    await api(`/api/admin/schedule-drafts/${payload.draft.id}/discard`, { method: 'POST', body: {} });
+    toast('Draft discarded');
+    aSchedule();
+  });
+  if ($('#dpublish')) $('#dpublish').onclick = () => go(async () => {
+    const lines = [];
+    const block = payload.changes?.substitutes || {};
+    for (const row of (block.templates || []).slice(0, 8)) lines.push(`${row.weekday} ${row.time} ${shortType(row.name)} → ${(row.to || '').split(' ')[0]} · ${row.weeks} weeks`);
+    for (const row of (block.oneOffs || []).slice(0, 8)) lines.push(`${(row.date || '').slice(5)} ${row.time} ${shortType(row.name)} → ${(row.to || '').split(' ')[0]}`);
+    if (!lines.length) lines.push('No teacher changes to send.');
+    const unfilled = payload.diff?.unfilled?.length || 0;
+    const creates = payload.diff?.creates?.length || 0;
+    const cancels = payload.diff?.cancels?.length || 0;
+    const text = `This updates the teacher on classes that already exist. Mindbody emails stay off.\n\n${lines.join('\n')}\n\n${unfilled} unfilled stay Kaizen Sensei and are not sent.\n${creates} new classes and ${cancels} cancellations are not sent in this version.`;
+    if (!await confirmBox('Publish these teacher changes?', text, 'Publish')) return;
+    const result = await api(`/api/admin/schedule-drafts/${payload.draft.id}/publish`, { method: 'POST', body: { confirm: true } });
+    const sent = result.sent?.length || 0;
+    const skipped = result.skipped?.length || 0;
+    const failed = result.failed?.length || 0;
+    toast(result.writes ? `Sent ${sent}, already matching ${skipped}, failed ${failed}.` : (result.message || 'Review only, publishing to Mindbody is off'));
+    aSchedule();
+  });
+  if ($('#dadd')) $('#dadd').onsubmit = (e) => {
+    e.preventDefault();
+    const f = e.target;
+    go(async () => {
+      await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots`, { method: 'POST', body: { date: f.date.value, start: f.start.value, end: f.end.value, name: f.name.value } });
+      toast('One-off added');
+      aSchedule();
+    });
+  };
+  $('#draft')?.addEventListener('change', (e) => {
+    const sel = e.target.closest('select');
+    if (!sel || !sel.value) return;
+    if (sel.dataset.template) {
+      go(async () => {
+        const result = await api(`/api/admin/schedule-drafts/${payload.draft.id}/template`, { method: 'PUT', body: { dow: Number(sel.dataset.dow), time: sel.dataset.time, end: sel.dataset.end, name: sel.dataset.name, instructor_id: Number(sel.value) } });
+        toast(result.kept === result.applied ? 'Applied to every week' : `Applied to ${result.kept} of ${result.applied} weeks`);
+        aSchedule();
+      });
+      return;
+    }
+    if (!sel.dataset.pin) return;
+    go(async () => {
+      await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots/${sel.dataset.pin}`, { method: 'PUT', body: { instructor_id: Number(sel.value) } });
+      toast('That date was updated');
+      aSchedule();
+    });
+  });
+  $('#draft')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-remove]');
+    if (!btn) return;
+    go(async () => {
+      if (!await confirmBox('Remove this date?', 'It leaves the weekly row and would be cancelled later if Mindbody already has it. Nothing is cancelled now.', 'Remove')) return;
+      await api(`/api/admin/schedule-drafts/${payload.draft.id}/slots/${btn.dataset.remove}/remove`, { method: 'POST', body: {} });
+      toast('Removed');
+      aSchedule();
+    });
+  });
 }
 
 function availabilityStatusLabel(i) {

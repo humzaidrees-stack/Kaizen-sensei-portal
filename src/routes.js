@@ -4,7 +4,12 @@ import {
   nowLocal, todayLocal, addDays, toMin, reconcile, matchInstructor, awayRecord,
   fitsWeekly, teachingConflict, candidatesFor, isPlaceholder, placeholderName, classesCoveredBy,
 } from './logic.js';
-import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, fetchStaffPhones, pushSubstitute } from './mindbody.js';
+import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, fetchStaffPhones, pushSubstitute, importClassHistory } from './mindbody.js';
+import {
+  addSlot, applyTemplate, createDraft, discardDraft, ensureFifteenthDrafts, findOpenDraft, getDraftRow,
+  pinSlot, presentDraft, publishDraft, removeSlot,
+} from './schedule-db.js';
+import { monthRange, publishDecision } from './schedule.js';
 import {
   publicUser, canTeach, canDesk, isManager, loadUserByToken, destroySession,
   verifyLogin, sessionCookie, clearCookie, hashPin, newPin, checkPin, nextCode, pinFromPhone,
@@ -30,6 +35,12 @@ export async function runScheduledSync() {
       sync = await reconcile();
     }
     await safe(notifyOpenedShifts(sync.openedRows || []));
+    try {
+      const monthly = await ensureFifteenthDrafts();
+      if (monthly.created?.length) console.log(`Monthly draft ready (${monthly.created.length})`);
+    } catch (err) {
+      console.error('monthly draft skipped', err.message);
+    }
   } catch (err) {
     await setSetting('last_sync_error', err.message);
     console.error('Sync failed', err.message);
@@ -407,6 +418,166 @@ route('GET', '/api/admin/schedule', 'desk', async (req, res, { url }) => {
   send(res, 200, { from, to, classes });
 });
 
+function parseMonth(value) {
+  if (!/^\d{4}-\d{2}$/.test(value || '')) return null;
+  const month = Number(value.slice(5, 7));
+  if (month < 1 || month > 12) return null;
+  return value;
+}
+
+function nextMonthKey(today) {
+  const [year, month] = today.split('-').map(Number);
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  return `${nextYear}-${String(nextMonth).padStart(2, '0')}`;
+}
+
+function missingTable(err) {
+  return err?.code === '42P01';
+}
+
+async function openDraftOrNull(location, month) {
+  const target = monthRange(Number(month.slice(0, 4)), Number(month.slice(5, 7)));
+  return findOpenDraft(location, target.start);
+}
+
+route('GET', '/api/admin/schedule-drafts', 'manager', async (req, res, { url }) => {
+  const month = parseMonth(url.searchParams.get('month')) || nextMonthKey(todayLocal());
+  const location = (url.searchParams.get('location') || 'Kaizen Pilates').trim();
+  try {
+    const draft = await openDraftOrNull(location, month);
+    if (!draft) {
+      return send(res, 200, {
+        ready: true,
+        draft: null,
+        month,
+        location,
+        diff: null,
+        publish: publishDecision({
+          flag: process.env.SCHEDULE_PUBLISH_ENABLED,
+          host: (req.headers.host || '').split(':')[0],
+          env: process.env.VERCEL_ENV,
+        }),
+      });
+    }
+    send(res, 200, await presentDraft(draft, req.headers.host || ''));
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+    send(res, 200, { ready: false, draft: null, month, location });
+  }
+});
+
+route('POST', '/api/admin/schedule-drafts', 'manager', async (req, res, { user }) => {
+  const body = await readBody(req);
+  const month = parseMonth(body.month) || nextMonthKey(todayLocal());
+  const location = String(body.location || 'Kaizen Pilates').trim();
+  if (!location) bad('Pick a location.');
+  try {
+    const draft = await createDraft({ location, month, createdBy: user.id, source: 'manual' });
+    send(res, 200, await presentDraft(draft, req.headers.host || ''));
+  } catch (err) {
+    if (!missingTable(err)) throw err;
+    throw new HttpError(503, 'Draft tables are not on this database yet.');
+  }
+});
+
+route('POST', '/api/admin/schedule-history', 'manager', async (req, res) => {
+  const body = await readBody(req);
+  if (process.env.VERCEL_ENV === 'preview') {
+    throw new HttpError(403, 'History import is off on preview. It would write to the production database.');
+  }
+  const month = parseMonth(body.month);
+  if (!month) bad('Pick a month.');
+  if (!mbConfigured()) bad('Mindbody is not connected.');
+  const range = monthRange(Number(month.slice(0, 4)), Number(month.slice(5, 7)));
+  try {
+    const result = await importClassHistory(range.start, range.end);
+    send(res, 200, result);
+  } catch (err) {
+    if (missingTable(err)) throw new HttpError(503, 'Draft tables are not on this database yet.');
+    throw new HttpError(502, err.message);
+  }
+});
+
+route('PUT', '/api/admin/schedule-drafts/:id/template', 'manager', async (req, res, { params }) => {
+  const draft = await getDraftRow(params.id);
+  if (!draft || draft.status !== 'draft') bad('Draft not found.');
+  const body = await readBody(req);
+  const time = String(body.time || '').slice(0, 5);
+  const end = String(body.end || '').slice(0, 5);
+  if (!isTime(time) || !isTime(end) || !String(body.name || '').trim()) bad('Pick a weekly class.');
+  if (body.dow == null || Number(body.dow) < 0 || Number(body.dow) > 6) bad('Pick a day.');
+  try {
+    const result = await applyTemplate(draft, {
+      dow: Number(body.dow), time, end, name: body.name, instructorId: body.instructor_id,
+    });
+    const view = await presentDraft(await getDraftRow(draft.id), req.headers.host || '');
+    send(res, 200, { ...view, kept: result.kept, applied: result.applied });
+  } catch (err) {
+    if (err.status) throw new HttpError(err.status, err.message);
+    throw err;
+  }
+});
+
+route('POST', '/api/admin/schedule-drafts/:id/slots', 'manager', async (req, res, { params }) => {
+  const draft = await getDraftRow(params.id);
+  if (!draft || draft.status !== 'draft') bad('Draft not found.');
+  const body = await readBody(req);
+  const start = String(body.start || '').slice(0, 5);
+  const end = String(body.end || '').slice(0, 5);
+  if (!isDate(body.date) || !isTime(start) || !isTime(end) || toMin(end) <= toMin(start)) bad('Give a date, a start and an end time.');
+  if (!String(body.name || '').trim()) bad('Give the class a name.');
+  try {
+    await addSlot(draft, { date: body.date, start, end, name: body.name });
+  } catch (err) {
+    if (err.status) throw new HttpError(err.status, err.message);
+    throw err;
+  }
+  const fresh = await getDraftRow(draft.id);
+  send(res, 200, await presentDraft(fresh, req.headers.host || ''));
+});
+
+route('POST', '/api/admin/schedule-drafts/:id/slots/:slotId/remove', 'manager', async (req, res, { params }) => {
+  const draft = await getDraftRow(params.id);
+  if (!draft || draft.status !== 'draft') bad('Draft not found.');
+  await removeSlot(draft, params.slotId);
+  send(res, 200, await presentDraft(await getDraftRow(draft.id), req.headers.host || ''));
+});
+
+route('PUT', '/api/admin/schedule-drafts/:id/slots/:slotId', 'manager', async (req, res, { params }) => {
+  const draft = await getDraftRow(params.id);
+  if (!draft || draft.status !== 'draft') bad('Draft not found.');
+  const body = await readBody(req);
+  try {
+    await pinSlot(draft, params.slotId, body.instructor_id);
+  } catch (err) {
+    if (err.status) throw new HttpError(err.status, err.message);
+    throw err;
+  }
+  send(res, 200, await presentDraft(await getDraftRow(draft.id), req.headers.host || ''));
+});
+
+route('POST', '/api/admin/schedule-drafts/:id/discard', 'manager', async (req, res, { params }) => {
+  const draft = await getDraftRow(params.id);
+  if (!draft || draft.status !== 'draft') bad('Draft not found.');
+  await discardDraft(draft);
+  send(res, 200, { ok: true });
+});
+
+// Teacher changes on existing classes, production host only, and only after a second confirm.
+// Creates and cancels are counted and not sent. Unfilled rows are not sent.
+route('POST', '/api/admin/schedule-drafts/:id/publish', 'manager', async (req, res, { params, user }) => {
+  const draft = await getDraftRow(params.id);
+  if (!draft || draft.status !== 'draft') bad('Draft not found.');
+  const body = await readBody(req);
+  const result = await publishDraft(draft, {
+    actorId: user.id,
+    host: req.headers.host || '',
+    confirm: body?.confirm === true,
+  });
+  send(res, 200, result);
+});
+
 route('POST', '/api/admin/sync', 'manager', async (req, res) => {
   if (!mbConfigured()) bad('Mindbody is not connected yet. Add the API key and site ID, or import a CSV.');
   try {
@@ -492,7 +663,9 @@ route('POST', '/api/admin/shifts/:id/assign', 'desk', async (req, res, { params 
   if (!inst) bad('Pick an instructor.');
   let mb_note = null;
   const writable = s.class_id && !String(s.class_id).startsWith('csv:') && !String(s.class_id).startsWith('demo:');
-  if (writable && mbCanWrite()) {
+  if (process.env.VERCEL_ENV === 'preview') {
+    mb_note = 'Preview does not write to Mindbody.';
+  } else if (writable && mbCanWrite()) {
     if (!inst.mb_staff_id) mb_note = `Not updated in Mindbody: ${inst.name} has no Mindbody staff ID linked. Update the class by hand.`;
     else {
       try {

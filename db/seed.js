@@ -23,7 +23,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dataDir = path.join(root, 'data');
 mkdirSync(dataDir, { recursive: true });
 
-await prepare(`TRUNCATE alerts, claims, shifts, classes, unavailability, availability, sessions, login_attempts, instructors, settings RESTART IDENTITY CASCADE`).run();
+await prepare(`TRUNCATE alerts, claims, shifts, classes, class_history, schedule_draft_slots, schedule_drafts, unavailability, availability, sessions, login_attempts, instructors, settings RESTART IDENTITY CASCADE`).run();
 
 const roster = [
   ['Charmaine Al Mulaifi', 'Charmaine'],

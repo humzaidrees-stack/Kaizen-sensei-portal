@@ -1,0 +1,765 @@
+// Monthly draft. Builds next month from last month's weekday/time/class pattern,
+// then fills teachers. It does not call Mindbody and it does not write.
+import { addDays, dowOf, toMin } from './logic.js';
+
+export const PLACEHOLDER_NAME = 'Kaizen Sensei';
+const DAY = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+export function normName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+export function isPlaceholderName(name) {
+  const n = normName(name).replace(/ /g, '');
+  return n === 'kaizensensei' || n.includes('kaizensensei');
+}
+
+export function isPowerSurge(name) {
+  return normName(name).startsWith('power surge');
+}
+
+export function eachDate(start, end) {
+  const out = [];
+  for (let d = start; d <= end; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+
+export function monthRange(year, month) {
+  const start = `${year}-${String(month).padStart(2, '0')}-01`;
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const end = addDays(`${nextYear}-${String(nextMonth).padStart(2, '0')}-01`, -1);
+  return { start, end };
+}
+
+// On the 15th the target is the following calendar month and the pattern is this month.
+export function monthsForFifteenth(today) {
+  const [year, month, day] = String(today).split('-').map(Number);
+  if (day !== 15) return null;
+  const pattern = monthRange(year, month);
+  const targetYear = month === 12 ? year + 1 : year;
+  const targetMonth = month === 12 ? 1 : month + 1;
+  return { pattern, target: monthRange(targetYear, targetMonth) };
+}
+
+export function previousMonth(monthKey) {
+  const [year, month] = String(monthKey).split('-').map(Number);
+  const y = month === 1 ? year - 1 : year;
+  const m = month === 1 ? 12 : month - 1;
+  return { key: `${y}-${String(m).padStart(2, '0')}`, ...monthRange(y, m) };
+}
+
+export function weekStart(date) {
+  return addDays(date, -dowOf(date));
+}
+
+export function hoursCover(hours, start, end) {
+  const s = toMin(start.slice(11));
+  const e = toMin(end.slice(11));
+  if (!(e > s)) return false;
+  const dow = dowOf(start.slice(0, 10));
+  for (let h = Math.floor(s / 60); h < Math.ceil(e / 60); h++) {
+    if (!hours.has(`${dow}-${h}`)) return false;
+  }
+  return true;
+}
+
+export function isAway(timeoff, instructorId, start, end) {
+  const date = start.slice(0, 10);
+  const s = toMin(start.slice(11));
+  const e = toMin(end.slice(11));
+  return timeoff.some((t) => {
+    if (t.instructorId !== instructorId) return false;
+    if (t.startDate > date || t.endDate < date) return false;
+    if (!t.startTime || !t.endTime) return true;
+    return toMin(t.startTime) < e && toMin(t.endTime) > s;
+  });
+}
+
+export function overlaps(aStart, aEnd, bStart, bEnd) {
+  return aStart < bEnd && aEnd > bStart;
+}
+
+function personKey(name) {
+  return normName(name).replace(/ /g, '');
+}
+
+export function matchSensei(staffId, staffName, instructors) {
+  if (isPlaceholderName(staffName)) return null;
+  if (staffId) {
+    const hit = instructors.find((i) => i.mbStaffId && String(i.mbStaffId) === String(staffId));
+    if (hit) return hit;
+  }
+  if (!staffName) return null;
+  let n = staffName;
+  if (n.includes(',')) {
+    const [last, first] = n.split(',').map((s) => s.trim());
+    n = `${first} ${last}`;
+  }
+  const key = personKey(n);
+  const single = !n.trim().includes(' ');
+  return instructors.find((i) => personKey(i.mbName || '') === key)
+    || instructors.find((i) => personKey(i.name) === key)
+    || (single ? instructors.find((i) => personKey((i.mbName || i.name).split(' ')[0]) === key) : null)
+    || null;
+}
+
+function patternKey(dow, startTime, endTime, name) {
+  return `${dow}|${startTime}|${endTime}|${normName(name)}`;
+}
+
+function sameLocation(a, b) {
+  return normName(a) === normName(b);
+}
+
+function weekdayTotals(start, end) {
+  const totals = new Map();
+  for (const date of eachDate(start, end)) {
+    const dow = dowOf(date);
+    totals.set(dow, (totals.get(dow) || 0) + 1);
+  }
+  return totals;
+}
+
+// A slot is kept when it happened on more than half of that weekday in the source month.
+// One-offs are dropped. Times that remain are copied, not moved.
+export function patternFromClasses(classes, location, range) {
+  const totals = range?.start && range?.end ? weekdayTotals(range.start, range.end) : null;
+  const grouped = new Map();
+  for (const c of classes) {
+    if (c.cancelled) continue;
+    if (location && !sameLocation(c.location, location)) continue;
+    const date = c.start.slice(0, 10);
+    const startTime = c.start.slice(11, 16);
+    const endTime = c.end.slice(11, 16);
+    const key = patternKey(dowOf(date), startTime, endTime, c.name);
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        dow: dowOf(date),
+        startTime,
+        endTime,
+        names: new Map(),
+        dates: new Set(),
+      });
+    }
+    const row = grouped.get(key);
+    row.dates.add(date);
+    row.names.set(c.name, (row.names.get(c.name) || 0) + 1);
+  }
+  const slots = [];
+  const dropped = [];
+  for (const row of grouped.values()) {
+    const total = totals ? (totals.get(row.dow) || row.dates.size) : row.dates.size;
+    const entry = {
+      dow: row.dow,
+      startTime: row.startTime,
+      endTime: row.endTime,
+      name: [...row.names.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0],
+      weeks: row.dates.size,
+      weekdayCount: total,
+    };
+    if (row.dates.size > total / 2) slots.push(entry);
+    else dropped.push(entry);
+  }
+  const byTime = (a, b) => a.dow - b.dow || a.startTime.localeCompare(b.startTime) || a.name.localeCompare(b.name);
+  slots.sort(byTime);
+  dropped.sort(byTime);
+  return { slots, dropped };
+}
+
+export function projectPattern(pattern, targetStart, targetEnd, location) {
+  const slots = [];
+  for (const date of eachDate(targetStart, targetEnd)) {
+    const dow = dowOf(date);
+    for (const slot of pattern) {
+      if (slot.dow !== dow) continue;
+      slots.push({
+        date,
+        start: `${date}T${slot.startTime}`,
+        end: `${date}T${slot.endTime}`,
+        name: slot.name,
+        location,
+      });
+    }
+  }
+  return slots;
+}
+
+function usualCounts(patternClasses, instructors, location) {
+  const counts = new Map();
+  for (const c of patternClasses) {
+    if (c.cancelled) continue;
+    if (location && !sameLocation(c.location, location)) continue;
+    const who = matchSensei(c.staffId, c.staffName, instructors);
+    if (!who) continue;
+    const key = patternKey(dowOf(c.start.slice(0, 10)), c.start.slice(11, 16), c.end.slice(11, 16), c.name);
+    if (!counts.has(key)) counts.set(key, new Map());
+    const bag = counts.get(key);
+    bag.set(who.id, (bag.get(who.id) || 0) + 1);
+  }
+  const usual = new Map();
+  for (const [key, bag] of counts) {
+    const ranked = [...bag.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+    usual.set(key, ranked[0][0]);
+  }
+  return usual;
+}
+
+function eligible(instructors, timeoff, commits, slot) {
+  return instructors.filter((i) => i.active && i.confirmed
+    && hoursCover(i.hours, slot.start, slot.end)
+    && !isAway(timeoff, i.id, slot.start, slot.end)
+    && !commits.some((c) => c.instructorId === i.id && overlaps(c.start, c.end, slot.start, slot.end)));
+}
+
+function loadOf(commits, instructorId, week) {
+  return commits.filter((c) => c.instructorId === instructorId && c.week === week).length;
+}
+
+function pickTeacher(people, usualId, commits, slot, power) {
+  if (!people.length) return { id: null, code: 'unfilled', load: 0 };
+  const week = weekStart(slot.date);
+  const loads = new Map(people.map((i) => [i.id, loadOf(commits, i.id, week)]));
+  const lightest = Math.min(...loads.values());
+  const usual = usualId != null ? people.find((i) => i.id === usualId) : null;
+  const light = people.filter((i) => loads.get(i.id) === lightest).sort((a, b) => a.name.localeCompare(b.name));
+  const normal = () => {
+    if (usual && loads.get(usual.id) <= lightest + 1) {
+      return { id: usual.id, code: power ? 'power_surge_fallback_usual' : 'usual', load: loads.get(usual.id) };
+    }
+    return { id: light[0].id, code: power ? 'power_surge_fallback' : 'lightest', load: lightest };
+  };
+  if (power) {
+    const heavy = people.filter((i) => loads.get(i.id) >= 7);
+    if (heavy.length) {
+      const lightestHeavy = Math.min(...heavy.map((i) => loads.get(i.id)));
+      if (usual && loads.get(usual.id) >= 7 && loads.get(usual.id) <= lightestHeavy + 1) {
+        return { id: usual.id, code: 'power_surge', load: loads.get(usual.id) };
+      }
+      const heavyLight = heavy.filter((i) => loads.get(i.id) === lightestHeavy).sort((a, b) => a.name.localeCompare(b.name));
+      return { id: heavyLight[0].id, code: 'power_surge', load: lightestHeavy };
+    }
+    return normal();
+  }
+  return normal();
+}
+
+function reasonText(code, slot, teacher, load) {
+  const when = `${DAY[dowOf(slot.date)]} ${slot.start.slice(11, 16)}`;
+  if (code === 'unfilled') return 'Unfilled. Nobody is free inside confirmed hours, so this stays with Kaizen Sensei.';
+  if (code === 'usual') return `Usual ${when} teacher, within 1 class of the lightest week (${load} classes).`;
+  if (code === 'lightest') return `Lightest week so far (${load} classes).`;
+  if (code === 'power_surge') return `Power Surge goes first to ${teacher?.name || 'this sensei'}, who already has ${load} classes this week.`;
+  if (code === 'power_surge_fallback_usual') return `Power Surge fallback. Usual ${when} teacher, within 1 class of the lightest week (${load} classes).`;
+  if (code === 'power_surge_fallback') return `Power Surge fallback. Lightest week so far (${load} classes).`;
+  if (code === 'pinned') return 'Chosen by the manager.';
+  return 'Assigned.';
+}
+
+function withKindNote(slot, text) {
+  if (slot.kind === 'added' && !text.startsWith('Added class.')) return `Added class. ${text}`;
+  if (slot.kind === 'missing') return `${text} Not in Mindbody for this date. A later step would create it.`;
+  return text;
+}
+
+function hoursNeeded(start, end) {
+  const s = toMin(start.slice(11));
+  const e = toMin(end.slice(11));
+  const hours = [];
+  if (!(e > s)) return hours;
+  for (let h = Math.floor(s / 60); h < Math.ceil(e / 60); h++) hours.push(h);
+  return hours;
+}
+
+function coversHours(person, slot, { confirmedOnly }) {
+  if (confirmedOnly && !person.confirmed) return false;
+  return hoursCover(person.hours, slot.start, slot.end);
+}
+
+function coversSomeHour(person, slot) {
+  if (!person.confirmed || !person.hours.size) return false;
+  const dow = dowOf(slot.date || slot.start.slice(0, 10));
+  const need = hoursNeeded(slot.start, slot.end);
+  const hit = need.filter((h) => person.hours.has(`${dow}-${h}`));
+  return hit.length > 0 && hit.length < need.length;
+}
+
+// Why a saved draft left a slot with Kaizen Sensei. Read-only. One primary cause.
+export function explainUnfilled({ slots, instructors, timeoff = [], fixedClasses = [] }) {
+  const active = instructors.filter((i) => i.active);
+  const commits = [];
+  for (const c of fixedClasses) {
+    const who = c.instructorId
+      ? active.find((i) => i.id === c.instructorId)
+      : matchSensei(c.staffId, c.staffName, active);
+    if (who) commits.push(commitOf(who.id, c.start, c.end));
+  }
+  for (const slot of slots) {
+    if (slot.removed || slot.kind !== 'extra') continue;
+    const who = matchSensei(slot.currentStaffId, slot.currentStaffName, active);
+    if (who) commits.push(commitOf(who.id, slot.start, slot.end));
+  }
+  for (const slot of slots) {
+    if (slot.removed || slot.kind === 'extra' || !slot.pinned || !slot.proposedInstructorId) continue;
+    commits.push(commitOf(slot.proposedInstructorId, slot.start, slot.end, slot.id));
+  }
+  const auto = slots.filter((s) => !s.removed && s.kind !== 'extra' && !s.pinned);
+  const ordered = [
+    ...auto.filter((s) => !isPowerSurge(s.name)).sort((a, b) => a.start.localeCompare(b.start) || a.name.localeCompare(b.name)),
+    ...auto.filter((s) => isPowerSurge(s.name)).sort((a, b) => a.start.localeCompare(b.start) || a.name.localeCompare(b.name)),
+  ];
+  const rows = [];
+  for (const slot of ordered) {
+    if (!slot.proposedInstructorId) rows.push(classifyUnfilled(slot, active, timeoff, commits));
+    else commits.push(commitOf(slot.proposedInstructorId, slot.start, slot.end, slot.id));
+  }
+  return rows;
+}
+
+function classifyUnfilled(slot, instructors, timeoff, commits) {
+  const power = isPowerSurge(slot.name);
+  const withHours = instructors.filter((i) => coversHours(i, slot, { confirmedOnly: true }));
+  const away = withHours.filter((i) => isAway(timeoff, i.id, slot.start, slot.end));
+  const notAway = withHours.filter((i) => !isAway(timeoff, i.id, slot.start, slot.end));
+  const overlapped = notAway.filter((i) => commits.some((c) => c.instructorId === i.id && overlaps(c.start, c.end, slot.start, slot.end)));
+  const free = notAway.filter((i) => !commits.some((c) => c.instructorId === i.id && overlaps(c.start, c.end, slot.start, slot.end)));
+  const secondary = [];
+  if (instructors.some((i) => coversSomeHour(i, slot))) secondary.push('partial_hour');
+  if (instructors.some((i) => !i.confirmed && i.hours.size && hoursCover(i.hours, slot.start, slot.end))) secondary.push('unconfirmed_has_hours');
+  let primary;
+  if (free.length) primary = power ? 'power_surge' : 'other';
+  else if (!withHours.length) primary = 'no_availability';
+  else if (!notAway.length) {
+    primary = 'time_off';
+    if (away.some((i) => commits.some((c) => c.instructorId === i.id && overlaps(c.start, c.end, slot.start, slot.end)))) secondary.push('also_overlap');
+  } else {
+    primary = 'overlap';
+    if (away.length) secondary.push('also_time_off');
+  }
+  if (power && primary !== 'power_surge') secondary.push('power_surge_slot');
+  const dow = dowOf(slot.date || slot.start.slice(0, 10));
+  return {
+    date: slot.date || slot.start.slice(0, 10),
+    time: slot.start.slice(11, 16),
+    end: slot.end.slice(11, 16),
+    dow,
+    hours: hoursNeeded(slot.start, slot.end),
+    type: String(slot.name || '').split(' - ')[0].trim(),
+    name: slot.name,
+    kind: slot.kind,
+    primary,
+    secondary,
+    dateMatchesStart: (slot.date || slot.start.slice(0, 10)) === slot.start.slice(0, 10),
+  };
+}
+
+function commitOf(instructorId, start, end, slotId = null) {
+  return { instructorId, start, end, week: weekStart(start.slice(0, 10)), slotId };
+}
+
+// slots: fill / missing / extra / added. fixedClasses are outside the draft month.
+export function assignDraft(slots, { instructors, timeoff = [], fixedClasses = [], patternClasses = [], location }) {
+  const usual = usualCounts(patternClasses, instructors, location);
+  const commits = fixedClasses
+    .map((c) => {
+      const who = c.instructorId ? instructors.find((i) => i.id === c.instructorId) : matchSensei(c.staffId, c.staffName, instructors);
+      if (!who) return null;
+      return commitOf(who.id, c.start, c.end);
+    })
+    .filter(Boolean);
+
+  const out = slots.map((s) => ({ ...s }));
+  for (const slot of out) {
+    if (slot.removed) {
+      slot.proposedInstructorId = null;
+      slot.reason = 'Removed. A later step would cancel this class in Mindbody.';
+      continue;
+    }
+    if (slot.kind === 'extra') {
+      slot.proposedInstructorId = null;
+      slot.reason = 'Already in Mindbody and not in last month\'s pattern. Left as it is.';
+      const who = matchSensei(slot.currentStaffId, slot.currentStaffName, instructors);
+      if (who) commits.push(commitOf(who.id, slot.start, slot.end));
+    }
+  }
+
+  const pinned = out.filter((s) => !s.removed && s.kind !== 'extra' && s.pinned && s.proposedInstructorId);
+  for (const slot of pinned) {
+    const people = eligible(instructors, timeoff, commits, slot);
+    const teacher = people.find((i) => i.id === slot.proposedInstructorId);
+    if (!teacher) {
+      slot.pinned = false;
+      slot.proposedInstructorId = null;
+      continue;
+    }
+    commits.push(commitOf(teacher.id, slot.start, slot.end, slot.id));
+    slot.reason = withKindNote(slot, reasonText('pinned', slot, teacher, 0));
+  }
+
+  const auto = out.filter((s) => !s.removed && s.kind !== 'extra' && !s.pinned);
+  const ordered = [
+    ...auto.filter((s) => !isPowerSurge(s.name)).sort((a, b) => a.start.localeCompare(b.start) || a.name.localeCompare(b.name)),
+    ...auto.filter((s) => isPowerSurge(s.name)).sort((a, b) => a.start.localeCompare(b.start) || a.name.localeCompare(b.name)),
+  ];
+  for (const slot of ordered) {
+    const people = eligible(instructors, timeoff, commits, slot);
+    const key = patternKey(dowOf(slot.date), slot.start.slice(11, 16), slot.end.slice(11, 16), slot.name);
+    const choice = pickTeacher(people, usual.get(key) ?? null, commits, slot, isPowerSurge(slot.name));
+    const teacher = choice.id != null ? instructors.find((i) => i.id === choice.id) : null;
+    slot.proposedInstructorId = choice.id;
+    slot.reason = withKindNote(slot, reasonText(choice.code, slot, teacher, choice.load));
+    if (teacher) commits.push(commitOf(teacher.id, slot.start, slot.end, slot.id));
+    slot.eligibleIds = people.map((i) => i.id);
+  }
+  for (const slot of pinned) {
+    const people = eligible(instructors, timeoff, commits.filter((c) => c.slotId !== slot.id), slot);
+    slot.eligibleIds = people.map((i) => i.id);
+  }
+  return out;
+}
+
+function metaFrom(c) {
+  return {
+    classDescriptionId: c.classDescriptionId || null,
+    locationId: c.locationId || null,
+    resourceId: c.resourceId || null,
+    staffPayRate: c.staffPayRate ?? null,
+    maxCapacity: c.capacity ?? c.maxCapacity ?? null,
+    webCapacity: c.webCapacity ?? null,
+    waitlistCapacity: c.waitlistCapacity ?? null,
+    bookingStatus: c.bookingStatus || null,
+    classScheduleId: c.classScheduleId || null,
+  };
+}
+
+export function buildMonthDraft({
+  patternClasses, targetClasses, instructors, timeoff = [], fixedClasses = [], location, targetStart, targetEnd,
+  patternStart, patternEnd,
+}) {
+  const { slots: pattern, dropped } = patternFromClasses(
+    patternClasses,
+    location,
+    patternStart && patternEnd ? { start: patternStart, end: patternEnd } : null,
+  );
+  const projected = projectPattern(pattern, targetStart, targetEnd, location);
+  const pool = targetClasses.filter((c) => !c.cancelled && (!location || sameLocation(c.location, location)));
+  const used = new Set();
+  const slots = [];
+  for (const slot of projected) {
+    const match = pool.find((c) => !used.has(c.id)
+      && c.start.slice(0, 16) === slot.start
+      && normName(c.name) === normName(slot.name));
+    if (match) {
+      used.add(match.id);
+      slots.push({
+        ...slot,
+        ...metaFrom(match),
+        kind: 'fill',
+        classId: match.id,
+        currentStaffId: match.staffId || null,
+        currentStaffName: match.staffName || null,
+        booked: match.booked ?? null,
+        removed: false,
+        pinned: false,
+        proposedInstructorId: null,
+      });
+    } else {
+      slots.push({
+        ...slot,
+        kind: 'missing',
+        classId: null,
+        currentStaffId: null,
+        currentStaffName: PLACEHOLDER_NAME,
+        booked: null,
+        classDescriptionId: null,
+        locationId: null,
+        resourceId: null,
+        staffPayRate: null,
+        maxCapacity: null,
+        webCapacity: null,
+        waitlistCapacity: null,
+        bookingStatus: null,
+        classScheduleId: null,
+        removed: false,
+        pinned: false,
+        proposedInstructorId: null,
+      });
+    }
+  }
+  for (const c of pool) {
+    if (used.has(c.id)) continue;
+    slots.push({
+      date: c.start.slice(0, 10),
+      start: c.start.slice(0, 16),
+      end: c.end.slice(0, 16),
+      name: c.name,
+      location: c.location,
+      ...metaFrom(c),
+      kind: 'extra',
+      classId: c.id,
+      currentStaffId: c.staffId || null,
+      currentStaffName: c.staffName || null,
+      booked: c.booked ?? null,
+      removed: false,
+      pinned: false,
+      proposedInstructorId: null,
+    });
+  }
+  const assigned = assignDraft(slots, { instructors, timeoff, fixedClasses, patternClasses, location });
+  return {
+    slots: assigned,
+    dropped: dropped.length,
+    droppedDates: projectPattern(dropped, targetStart, targetEnd, location).length,
+  };
+}
+
+export function sameTeacher(slot, instructor) {
+  if (!instructor) return false;
+  if (instructor.mbStaffId && slot.currentStaffId && String(instructor.mbStaffId) === String(slot.currentStaffId)) return true;
+  return normName(instructor.name) === normName(slot.currentStaffName)
+    || (instructor.mbName && normName(instructor.mbName) === normName(slot.currentStaffName));
+}
+
+function briefSlot(s) {
+  return {
+    slotId: s.id || null,
+    date: s.date || s.start.slice(0, 10),
+    time: s.start.slice(11, 16),
+    end: s.end.slice(11, 16),
+    name: s.name,
+    classId: s.classId || null,
+    booked: s.booked || 0,
+  };
+}
+
+export function summarizeDraft(slots, instructors) {
+  const byId = new Map(instructors.map((i) => [i.id, i]));
+  const brief = briefSlot;
+  const active = slots.filter((s) => !s.removed);
+  const creates = active.filter((s) => !s.classId).map(brief);
+  const cancels = slots.filter((s) => s.removed && s.classId).map(brief);
+  const substitutes = [];
+  let unchanged = 0;
+  for (const s of active) {
+    if (s.kind === 'extra' || !s.classId) {
+      if (s.kind === 'extra') unchanged += 1;
+      continue;
+    }
+    const teacher = s.proposedInstructorId ? byId.get(s.proposedInstructorId) : null;
+    if (teacher && !sameTeacher(s, teacher)) {
+      substitutes.push({
+        ...brief(s),
+        from: s.currentStaffName || PLACEHOLDER_NAME,
+        to: teacher.name,
+      });
+    } else if (teacher) unchanged += 1;
+  }
+  const unfilled = active
+    .filter((s) => s.kind !== 'extra' && !s.proposedInstructorId)
+    .map((s) => ({ ...brief(s), keeps: PLACEHOLDER_NAME }));
+  return {
+    creates,
+    cancels,
+    substitutes,
+    unfilled,
+    extras: active.filter((s) => s.kind === 'extra').length,
+    unchanged,
+    writes: false,
+    phase: 1,
+  };
+}
+
+export const REVIEW_ONLY = 'Review only, publishing to Mindbody is off';
+export const NOT_SENT = 'Creates and cancellations are not sent in this version. Unfilled classes are left as they are in Mindbody.';
+
+// Unset means on, but only for a manager request on the production host.
+// SCHEDULE_PUBLISH_ENABLED=0 turns it off. Preview never writes.
+export function publishDecision({ flag, host, env } = {}) {
+  const productionHost = host === 'sensei.kaizenpilates.ae';
+  const explicitlyOff = flag === '0' || flag === 'false' || flag === false;
+  const preview = env === 'preview';
+  const writes = productionHost && !explicitlyOff && !preview;
+  return {
+    writes,
+    enabled: writes,
+    phase: 1,
+    productionHost,
+    message: writes
+      ? 'Publishing changes the teacher on classes that already exist. New classes and cancellations are not sent. Unfilled classes stay as they are in Mindbody.'
+      : REVIEW_ONLY,
+  };
+}
+
+// Teacher changes on existing classes only. Unfilled, new, and removed classes are not sent.
+export function publishRows(slots, instructors) {
+  const byId = new Map(instructors.map((i) => [i.id, i]));
+  const send = [];
+  const already = [];
+  const unfilled = [];
+  const creates = [];
+  const cancels = [];
+  for (const slot of slots) {
+    if (slot.removed) {
+      if (slot.classId) cancels.push(briefSlot(slot));
+      continue;
+    }
+    if (slot.kind === 'extra') continue;
+    if (!slot.classId || slot.kind === 'missing' || slot.kind === 'added') {
+      creates.push(briefSlot(slot));
+      continue;
+    }
+    const teacher = slot.proposedInstructorId ? byId.get(slot.proposedInstructorId) : null;
+    if (!teacher) {
+      unfilled.push(briefSlot(slot));
+      continue;
+    }
+    const item = {
+      ...briefSlot(slot),
+      fromStaffId: slot.currentStaffId || null,
+      fromName: slot.currentStaffName || PLACEHOLDER_NAME,
+      toStaffId: teacher.mbStaffId || null,
+      toName: teacher.name,
+      toId: teacher.id,
+    };
+    if (sameTeacher(slot, teacher)) already.push(item);
+    else send.push(item);
+  }
+  return { send, already, unfilled, creates, cancels };
+}
+
+const SHORT_DAY = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+function classType(name) {
+  return String(name || '').split(' - ')[0].trim();
+}
+
+function modeSensei(list) {
+  const counts = new Map();
+  for (const slot of list) counts.set(slot.proposedInstructorId || 0, (counts.get(slot.proposedInstructorId || 0) || 0) + 1);
+  let chosen = 0;
+  let best = -1;
+  for (const [id, n] of counts) {
+    if (n > best || (n === best && chosen === 0 && id !== 0)) {
+      best = n;
+      chosen = id;
+    }
+  }
+  return chosen || null;
+}
+
+// Group per-date slots into one row per weekday/time/class, plus dates that differ.
+export function templateView(slots) {
+  const load = new Map();
+  for (const slot of slots) {
+    if (slot.proposedInstructorId) load.set(slot.proposedInstructorId, (load.get(slot.proposedInstructorId) || 0) + 1);
+  }
+  const groups = new Map();
+  const exceptions = [];
+  for (const slot of slots) {
+    if (slot.removed || slot.kind === 'extra' || slot.kind === 'added') {
+      exceptions.push(exceptionRow(slot, slot.removed ? 'Removed' : (slot.kind === 'extra' ? 'Extra' : 'Added')));
+      continue;
+    }
+    const dow = dowOf(slot.date);
+    const key = `${dow}|${slot.start.slice(11, 16)}|${slot.end.slice(11, 16)}|${normName(slot.name)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  }
+  const rows = [];
+  for (const [key, list] of groups) {
+    const senseiId = modeSensei(list);
+    const sample = list.find((s) => (s.proposedInstructorId || null) === senseiId) || list[0];
+    const filled = list.filter((s) => s.proposedInstructorId).length;
+    const votes = new Map();
+    for (const slot of list) {
+      for (const option of slot.options || []) {
+        const cur = votes.get(option.id) || { id: option.id, name: option.name, weeks: 0, load: load.get(option.id) || 0 };
+        cur.weeks += 1;
+        votes.set(option.id, cur);
+      }
+    }
+    const ranked = [...votes.values()].sort((a, b) => b.weeks - a.weeks || a.load - b.load || a.name.localeCompare(b.name));
+    if (senseiId && !ranked.some((o) => o.id === senseiId)) {
+      ranked.unshift({ id: senseiId, name: sample.proposedName || 'Sensei', weeks: filled, load: load.get(senseiId) || 0 });
+    }
+    const dow = dowOf(list[0].date);
+    rows.push({
+      key,
+      dow,
+      weekday: SHORT_DAY[dow],
+      time: list[0].start.slice(11, 16),
+      end: list[0].end.slice(11, 16),
+      name: list[0].name,
+      type: classType(list[0].name),
+      senseiId,
+      senseiName: senseiId ? (sample.proposedName || 'Sensei') : PLACEHOLDER_NAME,
+      total: list.length,
+      filled,
+      unfilled: list.length - filled,
+      suggested: ranked.slice(0, 5),
+      others: ranked.slice(5, 10),
+    });
+    for (const slot of list) {
+      if ((slot.proposedInstructorId || null) === senseiId) continue;
+      exceptions.push(exceptionRow(slot, slot.proposedInstructorId ? 'Different sensei' : 'Unfilled'));
+    }
+  }
+  rows.sort((a, b) => a.dow - b.dow || a.time.localeCompare(b.time) || a.type.localeCompare(b.type));
+  exceptions.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time));
+  const unfilled = slots.filter((s) => !s.removed && s.kind !== 'extra' && !s.proposedInstructorId).length;
+  return { rows, exceptions, unfilled };
+}
+
+function exceptionRow(slot, label) {
+  return {
+    id: slot.id,
+    date: slot.date,
+    time: slot.start.slice(11, 16),
+    end: slot.end.slice(11, 16),
+    name: slot.name,
+    type: classType(slot.name),
+    label,
+    kind: slot.kind,
+    removed: !!slot.removed,
+    senseiId: slot.proposedInstructorId || null,
+    senseiName: slot.proposedName || PLACEHOLDER_NAME,
+    options: (slot.options || []).slice(0, 8),
+    reason: slot.reason || '',
+  };
+}
+
+function changeKey(row) {
+  const date = row.date;
+  return `${dowOf(date)}|${row.time}|${normName(row.name)}`;
+}
+
+// Publish summary in the same shape as the week view: one line per recurring change, then one-offs.
+export function groupChanges(diff) {
+  const bucket = (rows, field) => {
+    const groups = new Map();
+    for (const row of rows || []) {
+      const key = changeKey(row);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    const templates = [];
+    const oneOffs = [];
+    for (const list of groups.values()) {
+      const same = field ? list.every((row) => row[field] === list[0][field]) : true;
+      if (list.length > 1 && same) templates.push({ ...list[0], weeks: list.length, weekday: SHORT_DAY[dowOf(list[0].date)] });
+      else oneOffs.push(...list.map((row) => ({ ...row, weekday: SHORT_DAY[dowOf(row.date)] })));
+    }
+    return { templates, oneOffs };
+  };
+  return {
+    substitutes: bucket(diff?.substitutes, 'to'),
+    creates: bucket(diff?.creates),
+    cancels: bucket(diff?.cancels),
+    unfilled: bucket(diff?.unfilled),
+  };
+}
+
