@@ -2,6 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { resetDb, makeUser, makeClass } from './helpers.js';
 import { closePool, prepare } from '../src/db.js';
+import { ensureFifteenthDrafts, publishDraft } from '../src/schedule-db.js';
 import { createDevServer } from '../scripts/dev-server.js';
 
 let server;
@@ -77,13 +78,26 @@ describe('schedule draft API', { concurrency: 1 }, () => {
     assert.equal(generated.some((s) => s.kind === 'missing'), true);
     assert.equal(slots.some((s) => s.kind === 'extra' && s.name === 'Workshop'), true);
     assert.equal(built.data.publish.writes, false);
+    assert.equal(built.data.publish.message, 'Review only, publishing to Mindbody is off');
 
-    const published = await api(`/api/admin/schedule-drafts/${built.data.draft.id}/publish`, {
-      method: 'POST', token: manager.cookie, body: {},
-    });
+    const seen = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).includes('mindbodyonline.com')) seen.push(String(url));
+      return originalFetch(url, init);
+    };
+    let published;
+    try {
+      published = await api(`/api/admin/schedule-drafts/${built.data.draft.id}/publish`, {
+        method: 'POST', token: manager.cookie, body: { confirm: true },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
     assert.equal(published.status, 200);
     assert.equal(published.data.published, false);
     assert.equal(published.data.writes, false);
+    assert.equal(seen.length, 0);
     const still = await prepare("SELECT staff_name FROM classes WHERE id='dec-one'").get();
     assert.equal(still.staff_name, 'Kaizen Sensei');
     assert.equal(published.data.diff.creates.length > 0, true);
@@ -124,5 +138,112 @@ describe('schedule draft API', { concurrency: 1 }, () => {
     assert.equal(monday.filled, 2);
     assert.equal(monday.senseiId, ana.id);
     assert.equal(applied.data.draft.week.unfilled, 0);
+  });
+
+  it('publishes only a changed teacher on the production host, and skips a match', async () => {
+    await resetDb();
+    const ana = await makeUser({ code: 'KP911', name: 'Ana Teacher', pin: '1111', mbStaffId: '91' });
+    const bea = await makeUser({ code: 'KP912', name: 'Bea Teacher', pin: '2222', mbStaffId: '92' });
+    await prepare("UPDATE instructors SET availability_confirmed_at='2026-11-01 00:00:00' WHERE id IN (?, ?)").run(ana.id, bea.id);
+    const draft = await prepare(`INSERT INTO schedule_drafts(location, target_start, target_end, pattern_start, pattern_end, source)
+      VALUES('Kaizen Pilates','2026-12-01','2026-12-31','2026-11-01','2026-11-30','manual') RETURNING id`).get();
+    const insert = prepare(`INSERT INTO schedule_draft_slots(
+      draft_id, slot_date, start, "end", name, location, class_id, current_staff_id, current_staff_name,
+      proposed_instructor_id, reason, kind, eligible_ids
+    ) VALUES(?,?,?,?,?,'Kaizen Pilates',?,?,?,?,?,'fill','[]')`);
+    await insert.run(draft.id, '2026-12-07', '2026-12-07T08:00', '2026-12-07T09:00', 'Core Power', '701', '1', 'Kaizen Sensei', ana.id, 'Change');
+    await insert.run(draft.id, '2026-12-08', '2026-12-08T08:00', '2026-12-08T09:00', 'Core Power', '702', '92', 'Bea Teacher', bea.id, 'Same');
+    await insert.run(draft.id, '2026-12-09', '2026-12-09T08:00', '2026-12-09T09:00', 'Core Power', '703', '1', 'Kaizen Sensei', null, 'Open');
+    await insert.run(draft.id, '2026-12-10', '2026-12-10T08:00', '2026-12-10T09:00', 'Gentle Flow', null, null, null, ana.id, 'Missing');
+    await prepare(`UPDATE schedule_draft_slots SET kind='missing' WHERE class_id IS NULL AND draft_id=?`).run(draft.id);
+    await prepare(`INSERT INTO schedule_draft_slots(
+      draft_id, slot_date, start, "end", name, location, class_id, current_staff_name, reason, kind, removed, eligible_ids
+    ) VALUES(?,?,?,?,?,'Kaizen Pilates','704','Ana Teacher','Remove','fill',TRUE,'[]')`).run(
+      draft.id, '2026-12-11', '2026-12-11T08:00', '2026-12-11T09:00', 'Core Power',
+    );
+    const row = await prepare('SELECT * FROM schedule_drafts WHERE id=?').get(draft.id);
+    process.env.MB_API_KEY = 'key';
+    process.env.MB_SITE_ID = '123';
+    process.env.MB_USERNAME = 'svc';
+    process.env.MB_PASSWORD = 'pw';
+    const calls = [];
+    let posted = false;
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (!u.includes('mindbodyonline.com')) return original(url, init);
+      calls.push({ url: u, body: init?.body ? JSON.parse(init.body) : null });
+      if (u.includes('/usertoken/issue')) return { ok: true, text: async () => JSON.stringify({ AccessToken: 'staff-token' }) };
+      if (u.includes('/class/classes')) {
+        const id = new URL(u).searchParams.get('ClassIds');
+        const staff = id === '701'
+          ? (posted ? { Id: 91, DisplayName: 'Ana Teacher' } : { Id: 1, DisplayName: 'Kaizen Sensei' })
+          : { Id: 91, DisplayName: 'Ana Teacher' };
+        return { ok: true, text: async () => JSON.stringify({ Classes: [{ Id: Number(id), Staff: staff, Clients: [{ Email: 'hidden@example.com', Name: 'Client Name' }] }] }) };
+      }
+      if (u.includes('/class/substituteclassteacher')) {
+        posted = true;
+        return { ok: true, text: async () => JSON.stringify({ ClassId: 701 }) };
+      }
+      if (u.includes('addclassschedule') || u.includes('cancelsingleclass')) {
+        return { ok: false, status: 500, text: async () => 'should not be called' };
+      }
+      return { ok: false, status: 500, text: async () => 'nope' };
+    };
+    try {
+      const held = await publishDraft(row, { actorId: ana.id, host: 'sensei.kaizenpilates.ae', env: 'production', confirm: false });
+      assert.equal(held.needsConfirm, true);
+      assert.equal(held.published, false);
+      assert.equal(calls.length, 0);
+      assert.equal(held.counts.unfilled, 1);
+      assert.equal(held.counts.creates, 1);
+      assert.equal(held.counts.cancels, 1);
+
+      const preview = await publishDraft(row, { actorId: ana.id, host: 'sensei.kaizenpilates.ae', env: 'preview', confirm: true });
+      assert.equal(preview.writes, false);
+      assert.equal(preview.message, 'Review only, publishing to Mindbody is off');
+      assert.equal(calls.length, 0);
+
+      const done = await publishDraft(row, { actorId: ana.id, host: 'sensei.kaizenpilates.ae', env: 'production', confirm: true });
+      assert.equal(done.published, true);
+      assert.equal(done.sent.length, 1);
+      assert.equal(done.sent[0].classId, '701');
+      assert.equal(done.skipped.length, 1);
+      assert.equal(done.failed.length, 0);
+      const writes = calls.filter((call) => call.url.includes('substituteclassteacher'));
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].body.ClassId, 701);
+      assert.equal(writes[0].body.StaffId, 91);
+      assert.equal(writes[0].body.SendClientEmail, false);
+      assert.equal(writes[0].body.SendOriginalTeacherEmail, false);
+      assert.equal(writes[0].body.SendSubstituteTeacherEmail, false);
+      assert.equal(calls.some((call) => call.url.includes('addclassschedule') || call.url.includes('cancelsingleclass')), false);
+      const logs = await prepare("SELECT value FROM settings WHERE key LIKE 'schedule_publish_log:%'").all();
+      assert.equal(logs.length >= 2, true);
+      assert.equal(logs.some((log) => /hidden@example.com|Client Name/.test(log.value)), false);
+
+      calls.length = 0;
+      const again = await publishDraft(row, { actorId: ana.id, host: 'sensei.kaizenpilates.ae', env: 'production', confirm: true });
+      assert.equal(again.sent.length, 0);
+      assert.equal(again.skipped.some((row) => row.classId === '701' && row.reason === 'live'), true);
+      assert.equal(calls.some((call) => call.url.includes('substituteclassteacher')), false);
+    } finally {
+      globalThis.fetch = original;
+      delete process.env.MB_API_KEY;
+      delete process.env.MB_SITE_ID;
+      delete process.env.MB_USERNAME;
+      delete process.env.MB_PASSWORD;
+      const { clearTokenCache } = await import('../src/mindbody.js');
+      clearTokenCache();
+    }
+  });
+
+  it('does not build a fifteenth draft while auto-draft is off', async () => {
+    delete process.env.SCHEDULE_AUTO_DRAFT;
+    const before = await prepare('SELECT count(*)::int AS n FROM schedule_drafts').get();
+    const monthly = await ensureFifteenthDrafts('2026-12-15');
+    assert.deepEqual(monthly, { skipped: true, reason: 'auto_draft_off' });
+    const after = await prepare('SELECT count(*)::int AS n FROM schedule_drafts').get();
+    assert.equal(after.n, before.n);
   });
 });

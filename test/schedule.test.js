@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assignDraft, buildMonthDraft, eachDate, explainUnfilled, groupChanges, hoursCover, isAway, monthRange,
-  monthsForFifteenth, patternFromClasses, projectPattern, publishDecision, summarizeDraft, templateView,
+  monthsForFifteenth, patternFromClasses, projectPattern, publishDecision, publishRows, summarizeDraft, templateView,
 } from '../src/schedule.js';
 import { dowOf } from '../src/logic.js';
 import { historyRowFromMindbody } from '../src/mindbody.js';
@@ -363,13 +363,25 @@ describe('monthly draft rules', () => {
     assert.equal(diff.creates.length, 1);
     assert.equal(diff.cancels.length, 1);
     assert.equal(diff.cancels[0].booked, 3);
-    const locked = publishDecision({ flag: '1', host: 'sensei.kaizenpilates.ae' });
-    assert.equal(locked.writes, false);
-    assert.equal(locked.flagOn, true);
-    assert.equal(locked.productionHost, true);
-    const preview = publishDecision({ flag: '1', host: 'kaizen-sensei-portal-git-preview.vercel.app' });
-    assert.equal(preview.productionHost, false);
+    const prod = publishDecision({ host: 'sensei.kaizenpilates.ae', env: 'production' });
+    assert.equal(prod.writes, true);
+    assert.equal(prod.enabled, true);
+    const switchedOff = publishDecision({ flag: '0', host: 'sensei.kaizenpilates.ae', env: 'production' });
+    assert.equal(switchedOff.writes, false);
+    assert.equal(switchedOff.message, 'Review only, publishing to Mindbody is off');
+    const preview = publishDecision({ flag: '1', host: 'sensei.kaizenpilates.ae', env: 'preview' });
     assert.equal(preview.writes, false);
+    const otherHost = publishDecision({ host: 'kaizen-sensei-portal.vercel.app', env: 'production' });
+    assert.equal(otherHost.writes, false);
+    const rows = publishRows(slots, [ana]);
+    assert.equal(rows.send.length, 1);
+    assert.equal(rows.send[0].classId, '9');
+    assert.equal(rows.send[0].toStaffId, '55');
+    assert.equal(rows.creates.length, 1);
+    assert.equal(rows.cancels.length, 1);
+    assert.equal(rows.unfilled.length, 0);
+    assert.equal(rows.send.some((row) => !row.classId), false);
+    assert.equal(rows.cancels.some((row) => row.classId === '12'), true);
   });
 
   it('knows the 15th builds the following month from the current month', () => {

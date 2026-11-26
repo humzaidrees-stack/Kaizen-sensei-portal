@@ -71,7 +71,7 @@ function modal(html, onMount) {
   return close;
 }
 const confirmBox = (title, text, yes = 'Confirm') => new Promise(res => {
-  modal(`<h2>${esc(title)}</h2><p class="muted">${esc(text)}</p><div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="yes">${esc(yes)}</button></div>`,
+  modal(`<h2>${esc(title)}</h2><p class="muted" style="white-space:pre-wrap">${esc(text)}</p><div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="yes">${esc(yes)}</button></div>`,
     (bg, close) => { $('#yes', bg).onclick = () => { close(); res(true); }; bg.addEventListener('click', e => { if (e.target === bg || e.target.closest('[data-close]')) res(false); }); });
 });
 
@@ -468,12 +468,14 @@ function draftSection(payload) {
   const draft = payload.draft;
   const week = draft?.week;
   const unfilled = week?.unfilled || 0;
+  const canPublish = payload.publish?.writes === true;
   return `<div class="card" style="margin-top:28px" id="draft">
     <div class="head"><div><h2 style="margin:0">Draft for ${esc(monthTitle(draftMonth))}</h2>
       <p>One row per weekly class. A choice applies to every date that month.</p></div>
       <div class="btns"><button class="btn ghost small" id="dprev" type="button">Previous</button><button class="btn ghost small" id="dnext" type="button">Next</button></div></div>
+    <p class="banner">${esc(canPublish ? 'Publish changes the teacher on classes that already exist. New classes and cancellations are not sent. Unfilled classes stay as they are in Mindbody.' : (payload.publish?.message || 'Review only, publishing to Mindbody is off'))}</p>
     ${draft ? `${unfilled ? `<p class="chip warm" style="display:inline-block;margin:0 0 12px">${unfilled} unfilled · Kaizen Sensei</p>` : '<p class="chip dark" style="display:inline-block;margin:0 0 12px">Every weekly class has a sensei</p>'}
-      <div class="btns" style="margin-bottom:14px"><button class="btn ghost small" id="ddiscard" type="button">Discard</button><button class="btn small" id="dpublish" type="button">Review publish</button></div>
+      <div class="btns" style="margin-bottom:14px"><button class="btn ghost small" id="ddiscard" type="button">Discard</button>${canPublish ? '<button class="btn small" id="dpublish" type="button">Publish</button>' : ''}</div>
       ${diffBox(payload.changes, payload.publish, payload.diff)}
       <div class="tpl-week">${templateDays(week)}</div>
       <h3 style="margin:22px 0 8px">One-off changes</h3>
@@ -532,8 +534,10 @@ function diffBox(changes, publish, diff) {
     if (!lines.length) return '';
     return `<p class="small"><b>${esc(title)}</b><br>${lines.join('<br>')}</p>`;
   };
-  return `<details class="tpl-diff"><summary>What would be sent later</summary>
+  return `<details class="tpl-diff"><summary>${publish?.writes ? 'What publish will send' : 'What would be sent later'}</summary>
     <p class="small muted">${esc(publish?.message || 'Nothing is written to Mindbody.')}</p>
+    <p class="small muted">${diff?.unfilled?.length || 0} unfilled stay as they are in Mindbody and are not sent.</p>
+    <p class="small muted">New classes and cancellations are not sent in this version.</p>
     ${bit(changes?.substitutes, 'Weekly teacher changes')}
     ${bit(changes?.creates, 'Would create')}
     ${bit(changes?.cancels, 'Would cancel')}
@@ -553,8 +557,22 @@ function wireDraft(payload) {
     aSchedule();
   });
   if ($('#dpublish')) $('#dpublish').onclick = () => go(async () => {
-    const result = await api(`/api/admin/schedule-drafts/${payload.draft.id}/publish`, { method: 'POST', body: {} });
-    toast(result.message || 'Nothing was written to Mindbody');
+    const lines = [];
+    const block = payload.changes?.substitutes || {};
+    for (const row of (block.templates || []).slice(0, 8)) lines.push(`${row.weekday} ${row.time} ${shortType(row.name)} → ${(row.to || '').split(' ')[0]} · ${row.weeks} weeks`);
+    for (const row of (block.oneOffs || []).slice(0, 8)) lines.push(`${(row.date || '').slice(5)} ${row.time} ${shortType(row.name)} → ${(row.to || '').split(' ')[0]}`);
+    if (!lines.length) lines.push('No teacher changes to send.');
+    const unfilled = payload.diff?.unfilled?.length || 0;
+    const creates = payload.diff?.creates?.length || 0;
+    const cancels = payload.diff?.cancels?.length || 0;
+    const text = `This updates the teacher on classes that already exist. Mindbody emails stay off.\n\n${lines.join('\n')}\n\n${unfilled} unfilled stay Kaizen Sensei and are not sent.\n${creates} new classes and ${cancels} cancellations are not sent in this version.`;
+    if (!await confirmBox('Publish these teacher changes?', text, 'Publish')) return;
+    const result = await api(`/api/admin/schedule-drafts/${payload.draft.id}/publish`, { method: 'POST', body: { confirm: true } });
+    const sent = result.sent?.length || 0;
+    const skipped = result.skipped?.length || 0;
+    const failed = result.failed?.length || 0;
+    toast(result.writes ? `Sent ${sent}, already matching ${skipped}, failed ${failed}.` : (result.message || 'Review only, publishing to Mindbody is off'));
+    aSchedule();
   });
   if ($('#dadd')) $('#dadd').onsubmit = (e) => {
     e.preventDefault();

@@ -7,7 +7,7 @@ import {
 import { mbConfigured, mbCanWrite, syncClasses, fetchStaff, fetchStaffPhones, pushSubstitute, importClassHistory } from './mindbody.js';
 import {
   addSlot, applyTemplate, createDraft, discardDraft, ensureFifteenthDrafts, findOpenDraft, getDraftRow,
-  pinSlot, presentDraft, removeSlot,
+  pinSlot, presentDraft, publishDraft, removeSlot,
 } from './schedule-db.js';
 import { monthRange, publishDecision } from './schedule.js';
 import {
@@ -453,7 +453,11 @@ route('GET', '/api/admin/schedule-drafts', 'manager', async (req, res, { url }) 
         month,
         location,
         diff: null,
-        publish: publishDecision({ flag: process.env.MB_SCHEDULE_PUBLISH, host: (req.headers.host || '').split(':')[0] }),
+        publish: publishDecision({
+          flag: process.env.SCHEDULE_PUBLISH_ENABLED,
+          host: (req.headers.host || '').split(':')[0],
+          env: process.env.VERCEL_ENV,
+        }),
       });
     }
     send(res, 200, await presentDraft(draft, req.headers.host || ''));
@@ -560,13 +564,18 @@ route('POST', '/api/admin/schedule-drafts/:id/discard', 'manager', async (req, r
   send(res, 200, { ok: true });
 });
 
-// Phase 1: list the diff and stop. This handler does not call Mindbody.
-route('POST', '/api/admin/schedule-drafts/:id/publish', 'manager', async (req, res, { params }) => {
+// Teacher changes on existing classes, production host only, and only after a second confirm.
+// Creates and cancels are counted and not sent. Unfilled rows are not sent.
+route('POST', '/api/admin/schedule-drafts/:id/publish', 'manager', async (req, res, { params, user }) => {
   const draft = await getDraftRow(params.id);
   if (!draft || draft.status !== 'draft') bad('Draft not found.');
-  const view = await presentDraft(draft, req.headers.host || '');
-  const gate = publishDecision({ flag: process.env.MB_SCHEDULE_PUBLISH, host: (req.headers.host || '').split(':')[0] });
-  send(res, 200, { published: false, ...gate, diff: view.diff });
+  const body = await readBody(req);
+  const result = await publishDraft(draft, {
+    actorId: user.id,
+    host: req.headers.host || '',
+    confirm: body?.confirm === true,
+  });
+  send(res, 200, result);
 });
 
 route('POST', '/api/admin/sync', 'manager', async (req, res) => {

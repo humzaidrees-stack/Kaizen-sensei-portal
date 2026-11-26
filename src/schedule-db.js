@@ -1,10 +1,11 @@
 // Load schedule rows and store drafts. Reads classes and class_history.
-// Does not call Mindbody.
+// publishDraft is the only function here that calls Mindbody, and only for a confirmed teacher change.
 import { prepare, transaction } from './db.js';
 import { addDays, dowOf, todayLocal } from './logic.js';
+import { mbCanWrite, pushScheduleTeacher, readClassTeacher } from './mindbody.js';
 import {
-  assignDraft, buildMonthDraft, monthRange, monthsForFifteenth, normName, previousMonth,
-  publishDecision, summarizeDraft, templateView, groupChanges, weekStart, PLACEHOLDER_NAME,
+  assignDraft, buildMonthDraft, monthRange, monthsForFifteenth, normName, NOT_SENT, previousMonth,
+  publishDecision, publishRows, sameTeacher, summarizeDraft, templateView, groupChanges, weekStart, PLACEHOLDER_NAME,
 } from './schedule.js';
 
 const STAMP = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`;
@@ -262,7 +263,11 @@ export async function presentDraft(draft, host) {
   const slots = await slotsFor(draft.id);
   const instructors = await loadPeople();
   const diff = summarizeDraft(slots, instructors);
-  const gate = publishDecision({ flag: process.env.MB_SCHEDULE_PUBLISH, host: String(host || '').split(':')[0] });
+  const gate = publishDecision({
+    flag: process.env.SCHEDULE_PUBLISH_ENABLED,
+    host: String(host || '').split(':')[0],
+    env: process.env.VERCEL_ENV,
+  });
   const publicSlots = slots.map((slot) => publicSlot(slot, instructors));
   return {
     ready: true,
@@ -477,9 +482,10 @@ export function locationsFrom(classes) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name);
 }
 
-// Called from the sync route. Creates at most one draft per location per target month.
-// Uses rows already stored. It does not call Mindbody.
+// Called from the sync route. Off unless SCHEDULE_AUTO_DRAFT=1.
+// When it runs, it inserts one draft per location from rows already stored. It does not call Mindbody.
 export async function ensureFifteenthDrafts(today = todayLocal()) {
+  if (process.env.SCHEDULE_AUTO_DRAFT !== '1') return { skipped: true, reason: 'auto_draft_off' };
   if (process.env.VERCEL_ENV === 'preview') return { skipped: true, reason: 'preview' };
   const months = monthsForFifteenth(today);
   if (!months) return { skipped: true, reason: 'not_the_15th' };
@@ -499,4 +505,111 @@ export async function ensureFifteenthDrafts(today = todayLocal()) {
     if (draft) created.push(draft.id);
   }
   return { skipped: false, created };
+}
+
+function auditDetail(text) {
+  const detail = String(text || '').replace(/\s+/g, ' ').slice(0, 160);
+  if (/client|visit|email|@/i.test(detail)) return 'Mindbody returned an error.';
+  return detail;
+}
+
+async function writePublishAudit(entry) {
+  const at = new Date().toISOString();
+  const key = `schedule_publish_log:${entry.draftId}:${entry.classId}:${entry.result}:${at}:${entry.slotId || 'summary'}`;
+  const value = JSON.stringify({
+    at,
+    draftId: entry.draftId,
+    classId: entry.classId,
+    date: entry.date || null,
+    time: entry.time || null,
+    name: entry.name || null,
+    fromStaffId: entry.fromStaffId || null,
+    fromName: entry.fromName || null,
+    toStaffId: entry.toStaffId || null,
+    toName: entry.toName || null,
+    actorId: entry.actorId || null,
+    result: entry.result,
+    detail: auditDetail(entry.detail),
+  });
+  await prepare('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING').run(key, value);
+}
+
+// Sends teacher changes only. A matching Mindbody teacher is skipped. Unfilled rows are not sent.
+export async function publishDraft(draft, { actorId = null, host, env, confirm = false } = {}) {
+  const gate = publishDecision({
+    flag: process.env.SCHEDULE_PUBLISH_ENABLED,
+    host: String(host || '').split(':')[0],
+    env: env ?? process.env.VERCEL_ENV,
+  });
+  const slots = await slotsFor(draft.id);
+  const instructors = await loadPeople();
+  const diff = summarizeDraft(slots, instructors);
+  const rows = publishRows(slots, instructors);
+  const result = {
+    ...gate,
+    published: false,
+    needsConfirm: false,
+    diff,
+    changes: groupChanges(diff),
+    notSent: NOT_SENT,
+    counts: {
+      send: rows.send.length,
+      already: rows.already.length,
+      unfilled: rows.unfilled.length,
+      creates: rows.creates.length,
+      cancels: rows.cancels.length,
+    },
+    sent: [],
+    skipped: [],
+    failed: [],
+  };
+  if (!gate.writes) return result;
+  if (confirm !== true) return { ...result, needsConfirm: true };
+  if (!mbCanWrite()) {
+    result.failed.push({ classId: null, reason: 'Mindbody is not connected.' });
+    return result;
+  }
+  const byId = new Map(instructors.map((person) => [person.id, person]));
+  for (const item of rows.already) {
+    result.skipped.push({ classId: item.classId, date: item.date, time: item.time, name: item.name, reason: 'already' });
+    await writePublishAudit({ ...item, draftId: draft.id, actorId, result: 'skipped', detail: 'Stored teacher already matches.' });
+  }
+  for (const item of rows.send) {
+    const teacher = byId.get(item.toId);
+    if (!item.toStaffId) {
+      result.failed.push({ classId: item.classId, date: item.date, time: item.time, name: item.name, reason: 'That sensei has no Mindbody staff id.' });
+      await writePublishAudit({ ...item, draftId: draft.id, actorId, result: 'failed', detail: 'No Mindbody staff id.' });
+      continue;
+    }
+    let live = null;
+    try {
+      live = await readClassTeacher(item.classId);
+    } catch (err) {
+      result.failed.push({ classId: item.classId, date: item.date, time: item.time, name: item.name, reason: auditDetail(err.message) });
+      await writePublishAudit({ ...item, draftId: draft.id, actorId, result: 'failed', detail: err.message });
+      continue;
+    }
+    if (live && teacher && sameTeacher({ currentStaffId: live.staffId, currentStaffName: live.staffName }, teacher)) {
+      result.skipped.push({ classId: item.classId, date: item.date, time: item.time, name: item.name, reason: 'live' });
+      await writePublishAudit({ ...item, draftId: draft.id, actorId, result: 'skipped', detail: 'Mindbody teacher already matches.' });
+      continue;
+    }
+    try {
+      await pushScheduleTeacher(item.classId, item.toStaffId);
+      result.sent.push({ classId: item.classId, date: item.date, time: item.time, name: item.name, to: item.toName });
+      await writePublishAudit({ ...item, draftId: draft.id, actorId, result: 'sent', detail: 'Teacher updated.' });
+    } catch (err) {
+      result.failed.push({ classId: item.classId, date: item.date, time: item.time, name: item.name, reason: auditDetail(err.message) });
+      await writePublishAudit({ ...item, draftId: draft.id, actorId, result: 'failed', detail: err.message });
+    }
+  }
+  await writePublishAudit({
+    draftId: draft.id,
+    classId: 'summary',
+    actorId,
+    result: 'summary',
+    detail: `sent ${result.sent.length}, skipped ${result.skipped.length}, failed ${result.failed.length}, unfilled not sent ${rows.unfilled.length}, creates not sent ${rows.creates.length}, cancels not sent ${rows.cancels.length}`,
+  });
+  result.published = result.failed.length === 0;
+  return result;
 }

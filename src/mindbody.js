@@ -229,6 +229,7 @@ export async function importClassHistory(start, end) {
 }
 
 // POST /class/substituteclassteacher — payroll follows the instructor who covers.
+// Cover shifts still email the substitute teacher. Draft publish uses pushScheduleTeacher instead.
 export async function pushSubstitute(classId, staffId) {
   return raw('/class/substituteclassteacher', {
     method: 'POST',
@@ -241,4 +242,32 @@ export async function pushSubstitute(classId, staffId) {
       SendSubstituteTeacherEmail: true,
     },
   });
+}
+
+// Teacher change for a class that already exists. Every Mindbody email stays off.
+export async function pushScheduleTeacher(classId, staffId) {
+  return raw('/class/substituteclassteacher', {
+    method: 'POST',
+    body: {
+      ClassId: Number(classId),
+      StaffId: Number(staffId),
+      OverrideConflicts: false,
+      SendClientEmail: false,
+      SendOriginalTeacherEmail: false,
+      SendSubstituteTeacherEmail: false,
+    },
+  });
+}
+
+// Staff id and name only. The rest of the class payload, including any client list, is dropped.
+export async function readClassTeacher(classId) {
+  const q = new URLSearchParams({ ClassIds: String(classId) });
+  const body = await raw(`/class/classes?${q}`);
+  const cls = (body.Classes || []).find((row) => String(row.Id) === String(classId));
+  if (!cls?.Staff) return null;
+  const staff = cls.Staff;
+  return {
+    staffId: staff.Id == null ? null : String(staff.Id),
+    staffName: staff.DisplayName || staff.Name || [staff.FirstName, staff.LastName].filter(Boolean).join(' ') || null,
+  };
 }

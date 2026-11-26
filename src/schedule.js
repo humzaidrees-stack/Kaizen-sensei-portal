@@ -517,23 +517,28 @@ export function buildMonthDraft({
   };
 }
 
-function sameTeacher(slot, instructor) {
+export function sameTeacher(slot, instructor) {
   if (!instructor) return false;
   if (instructor.mbStaffId && slot.currentStaffId && String(instructor.mbStaffId) === String(slot.currentStaffId)) return true;
   return normName(instructor.name) === normName(slot.currentStaffName)
     || (instructor.mbName && normName(instructor.mbName) === normName(slot.currentStaffName));
 }
 
-export function summarizeDraft(slots, instructors) {
-  const byId = new Map(instructors.map((i) => [i.id, i]));
-  const brief = (s) => ({
+function briefSlot(s) {
+  return {
+    slotId: s.id || null,
     date: s.date || s.start.slice(0, 10),
     time: s.start.slice(11, 16),
     end: s.end.slice(11, 16),
     name: s.name,
     classId: s.classId || null,
     booked: s.booked || 0,
-  });
+  };
+}
+
+export function summarizeDraft(slots, instructors) {
+  const byId = new Map(instructors.map((i) => [i.id, i]));
+  const brief = briefSlot;
   const active = slots.filter((s) => !s.removed);
   const creates = active.filter((s) => !s.classId).map(brief);
   const cancels = slots.filter((s) => s.removed && s.classId).map(brief);
@@ -568,17 +573,62 @@ export function summarizeDraft(slots, instructors) {
   };
 }
 
-// Phase 1 never writes. The flag and host are reported so a later phase can use the same gate.
-export function publishDecision({ flag, host }) {
-  const flagOn = flag === '1' || flag === true;
+export const REVIEW_ONLY = 'Review only, publishing to Mindbody is off';
+export const NOT_SENT = 'Creates and cancellations are not sent in this version. Unfilled classes are left as they are in Mindbody.';
+
+// Unset means on, but only for a manager request on the production host.
+// SCHEDULE_PUBLISH_ENABLED=0 turns it off. Preview never writes.
+export function publishDecision({ flag, host, env } = {}) {
   const productionHost = host === 'sensei.kaizenpilates.ae';
+  const explicitlyOff = flag === '0' || flag === 'false' || flag === false;
+  const preview = env === 'preview';
+  const writes = productionHost && !explicitlyOff && !preview;
   return {
-    writes: false,
+    writes,
+    enabled: writes,
     phase: 1,
-    flagOn,
     productionHost,
-    message: 'Phase 1 lists changes only. Nothing is written to Mindbody.',
+    message: writes
+      ? 'Publishing changes the teacher on classes that already exist. New classes and cancellations are not sent. Unfilled classes stay as they are in Mindbody.'
+      : REVIEW_ONLY,
   };
+}
+
+// Teacher changes on existing classes only. Unfilled, new, and removed classes are not sent.
+export function publishRows(slots, instructors) {
+  const byId = new Map(instructors.map((i) => [i.id, i]));
+  const send = [];
+  const already = [];
+  const unfilled = [];
+  const creates = [];
+  const cancels = [];
+  for (const slot of slots) {
+    if (slot.removed) {
+      if (slot.classId) cancels.push(briefSlot(slot));
+      continue;
+    }
+    if (slot.kind === 'extra') continue;
+    if (!slot.classId || slot.kind === 'missing' || slot.kind === 'added') {
+      creates.push(briefSlot(slot));
+      continue;
+    }
+    const teacher = slot.proposedInstructorId ? byId.get(slot.proposedInstructorId) : null;
+    if (!teacher) {
+      unfilled.push(briefSlot(slot));
+      continue;
+    }
+    const item = {
+      ...briefSlot(slot),
+      fromStaffId: slot.currentStaffId || null,
+      fromName: slot.currentStaffName || PLACEHOLDER_NAME,
+      toStaffId: teacher.mbStaffId || null,
+      toName: teacher.name,
+      toId: teacher.id,
+    };
+    if (sameTeacher(slot, teacher)) already.push(item);
+    else send.push(item);
+  }
+  return { send, already, unfilled, creates, cancels };
 }
 
 const SHORT_DAY = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
